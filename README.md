@@ -173,10 +173,9 @@ Each team member will specialize in one domain, ensuring both focus and collabor
 
 ### **Evaluation Metrics**
 
-Project success will be assessed through a combination of practical testing, user feedback, and basic performance checks. The evaluation will focus on whether the system functions reliably and provides a smooth, helpful user experience.
+Project success will be assessed through a combination of practical testing, and basic performance checks. The evaluation will focus on whether the system functions reliably and provides a smooth, helpful user experience.
 
-* **Functionality Accuracy:** Evaluate how often the AI produces reasonable or partially correct command suggestions based on user prompts.  
-* **Ease of Use:** Gather informal feedback from users or classmates about how intuitive and efficient the interface feels.  
+* **Functionality Accuracy:** Evaluate how often the AI produces reasonable or partially correct command suggestions based on user prompts.   
 * **System Responsiveness:** Observe whether the TUI and shell interactions remain stable and responsive during normal use.  
 * **Basic Safety Checks:** Confirm that the program avoids executing clearly unsafe commands and handles unexpected inputs gracefully.
 
