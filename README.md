@@ -1,3 +1,17 @@
+# RustyTerm: Rust-Based AI Copilot for the Command Line
+
+## **Team Information**
+
+
+| Member      | Student Number | Email                        |
+|-------------|----------------|------------------------------|
+| Weijie Zhu  | 1009310906     | weijie.zhu@mail.utoronto.ca  |
+| Irys Zhang  | 1012794424     | irys.zhang@mail.utoronto.ca  |
+| Yushun Tang | 1011561962     | yushun.tang@mail.utoronto.ca |
+
+
+---
+
 ## **Introduction**
 
 In the modern developer workflow, the command line interface (CLI) remains one of the most powerful tools for interacting with a system. Although the command line interface is widely used, many developers, including those with significant experience, often find it challenging to recall the exact syntax, flags, or command combinations. Simple tasks such as searching files, piping output, or setting permissions often require looking up documentation or consulting online AI tools like ChatGPT or Claude. This constant context-switching between the terminal and browser interrupts workflow and reduces productivity.
@@ -30,58 +44,58 @@ The primary objective of this project is to design and implement a Rust-based AI
 
 ### **1\. Core Objectives**
 
-* Enhance productivity by reducing time spent switching between applications for command lookup.  
-* Provide AI-generated command suggestions that are contextually relevant to the user’s current working directory, environment variables, and command history.  
-* Ensure transparency and control by allowing users to review and understand AI-suggested commands before execution.  
+* Enhance productivity by reducing time spent switching between applications for command lookup.
+* Provide AI-generated command suggestions that are contextually relevant to the user’s current working directory, environment variables, and command history.
+* Ensure transparency and control by allowing users to review and understand AI-suggested commands before execution.
 * Demonstrate the potential of Rust for building robust, concurrent, and user-friendly terminal applications.
 
 ### **2\. Key Features**
 
 #### **2.1. TUI Split Interface**
 
-* The interface will feature a dual-pane layout, similar to modern IDEs like VSCode or Cursor.  
-* The left pane will host the active shell session (Zsh or Bash).  
-* The right pane will serve as the AI sidebar, where users can type queries, receive suggestions, and interact with the assistant.  
+* The interface will feature a dual-pane layout, similar to modern IDEs like VSCode or Cursor.
+* The left pane will host the active shell session (Zsh or Bash).
+* The right pane will serve as the AI sidebar, where users can type queries, receive suggestions, and interact with the assistant.
 * Navigation between panes will be keyboard-driven for efficiency.
 
 #### **2.2. AI Command Suggestions**
 
 The assistant will process natural-language input (e.g., “find all Python files larger than 1MB”) and return an appropriate shell command. The user can then choose among several actions:
 
-* **Explain:** Ask the AI to explain what the suggested command does and its potential side effects.  
-* **Accept:** Paste the command into the shell (configurable for automatic or manual execution).  
-* **Revise:** Request an improved or modified version of the command.  
+* **Explain:** Ask the AI to explain what the suggested command does and its potential side effects.
+* **Accept:** Paste the command into the shell (configurable for automatic or manual execution).
+* **Revise:** Request an improved or modified version of the command.
 * **Decline:** Dismiss the suggestion.
 
 #### **2.3. Context Awareness**
 
 The assistant will, optionally, read contextual data such as:
 
-* The current working directory (*cwd*)  
-* Environment variables  
-* Output of the previous command  
+* The current working directory (*cwd*)
+* Environment variables
+* Output of the previous command
   This feature enables the AI to tailor suggestions accurately (e.g., knowing when the user is in a Git repository or a project directory).
 
 #### **2.4. Security and Trust Layer**
 
 Given that AI-generated commands may involve sensitive operations, a security module will be developed.
 
-* Commands will be analyzed before execution to detect potentially harmful operations (e.g., *rm \-rf* /).  
-* A user-defined allowlist will specify which operations the AI is permitted to perform automatically.  
+* Commands will be analyzed before execution to detect potentially harmful operations (e.g., *rm \-rf* /).
+* A user-defined allowlist will specify which operations the AI is permitted to perform automatically.
 * Potentially dangerous commands will trigger warnings or require confirmation.
 
 #### **2.5. Session and Context Management**
 
-* Multiple AI sessions will be supported, allowing users to maintain different tasks or topics (e.g., debugging vs. file management).  
+* Multiple AI sessions will be supported, allowing users to maintain different tasks or topics (e.g., debugging vs. file management).
 * Session context will persist temporarily, enabling conversational continuity and iterative command refinement.
 
 #### **2.6. Extensibility**
 
 While the core product focuses on shell command assistance, the architecture will allow for future extensions such as:
 
-* Integration with code editors (e.g., Neovim)  
-* Command analytics for frequently used operations  
-* Multi-language shell support (Zsh, Bash, Fish)  
+* Integration with code editors (e.g., Neovim)
+* Command analytics for frequently used operations
+* Multi-language shell support (Zsh, Bash, Fish)
 * Cloud-based AI model connections for personalized training.
 
 ### **3\. Innovation and Differentiation**
@@ -96,44 +110,44 @@ The development process will be structured in three major phases \- Design & Pro
 
 **Goals:**
 
-* Finalize system architecture and user interface layout.  
-* Research existing Rust TUI frameworks (*tui-rs, ratatui, crossterm*) and select the most suitable.  
-* Design the AI integration layer by connecting directly to an external API service, such as the OpenAI API, for generating command suggestions and explanations.  
+* Finalize system architecture and user interface layout.
+* Research existing Rust TUI frameworks (*tui-rs, ratatui, crossterm*) and select the most suitable.
+* Design the AI integration layer by connecting directly to an external API service, such as the OpenAI API, for generating command suggestions and explanations.
 * Build wireframes of the split-screen interface and interaction flow.
 
 **Deliverables:**
 
-* Preliminary design document and mockups.  
+* Preliminary design document and mockups.
 * CLI-based prototype demonstrating text input and output in a dual-pane layout.
 
 ### **Phase 2: Implementation and Testing (Weeks 5–9)**
 
 **Goals:**
 
-* Implement TUI structure with concurrency support using *tokio*.  
-* Integrate shell (Zsh/Bash) subprocess management for command execution.  
-* Implement the AI backend for natural-language interpretation and command generation using the *`async-openai`* crate to handle asynchronous API communication efficiently.  
-* Develop a security module (command analyzer and allowlist system).  
+* Implement TUI structure with concurrency support using *tokio*.
+* Integrate shell (Zsh/Bash) subprocess management for command execution.
+* Implement the AI backend for natural-language interpretation and command generation using the *`async-openai`* crate to handle asynchronous API communication efficiently.
+* Develop a security module (command analyzer and allowlist system).
 * Add explain/accept/revise/decline functionality with keyboard shortcuts.
 
 **Deliverables:**
 
-* Fully functional TUI prototype with interactive shell and AI sidebar.  
-* Security checks in place for unsafe command detection.  
+* Fully functional TUI prototype with interactive shell and AI sidebar.
+* Security checks in place for unsafe command detection.
 * Internal test cases for user interactions and command execution.
 
 ### **Phase 3: Evaluation, Optimization, and Refinement (Weeks 10–13)**
 
 **Goals:**
 
-* Conduct usability testing with peers and gather feedback on command accuracy, safety, and UI clarity.  
-* Optimize performance and memory usage.  
-* Implement optional context awareness features (e.g., reading last command output).  
+* Conduct usability testing with peers and gather feedback on command accuracy, safety, and UI clarity.
+* Optimize performance and memory usage.
+* Implement optional context awareness features (e.g., reading last command output).
 * Prepare final presentation and documentation.
 
 **Deliverables:**
 
-* Completed application with stable performance.  
+* Completed application with stable performance.
 * Final report documenting design choices, limitations, and future work.
 
 ### **Division of Work and Roles**
@@ -159,34 +173,34 @@ Each team member will specialize in one domain, ensuring both focus and collabor
 |  | Technical documentation and user guide writing | ✓ | ✓ | ✓ |
 |  | Final presentation and report preparation | ✓ | ✓ | ✓ |
 
-## 
+##
 
 ### **Development Tools and Libraries**
 
-* **Language:** Rust  
-* **Libraries:** *tui-rs / ratatui, tokio, serde, reqwest, crossterm*  
-* **AI Backend:** OpenAI API or equivalent LLM interface  
-* **Version Control:** GitHub  
+* **Language:** Rust
+* **Libraries:** *tui-rs / ratatui, tokio, serde, reqwest, crossterm*
+* **AI Backend:** OpenAI API or equivalent LLM interface
+* **Version Control:** GitHub
 * **Testing Framework:** *cargo test* with mock input/output validation
 
-  ### 
+  ###
 
 ### **Evaluation Metrics**
 
 Project success will be assessed through a combination of practical testing, and basic performance checks. The evaluation will focus on whether the system functions reliably and provides a smooth, helpful user experience.
 
-* **Functionality Accuracy:** Evaluate how often the AI produces reasonable or partially correct command suggestions based on user prompts.   
-* **System Responsiveness:** Observe whether the TUI and shell interactions remain stable and responsive during normal use.  
+* **Functionality Accuracy:** Evaluate how often the AI produces reasonable or partially correct command suggestions based on user prompts.
+* **System Responsiveness:** Observe whether the TUI and shell interactions remain stable and responsive during normal use.
 * **Basic Safety Checks:** Confirm that the program avoids executing clearly unsafe commands and handles unexpected inputs gracefully.
 
 ### **Expected Outcomes and Learning Goals**
 
 This project will yield a fully functional AI-powered TUI shell assistant and deepen the team’s understanding of key Rust and systems programming concepts. Expected learning outcomes include:
 
-1. **Advanced Rust Programming:** Mastery of concurrency, error handling, and asynchronous programming.  
-2. **TUI Design and Usability:** Understanding terminal rendering, event-driven architecture, and input handling.  
-3. **AI and API Integration:** Practical experience in connecting language models to real-world interfaces.  
-4. **Security Awareness:** Implementing safe execution layers in system-level tools.  
+1. **Advanced Rust Programming:** Mastery of concurrency, error handling, and asynchronous programming.
+2. **TUI Design and Usability:** Understanding terminal rendering, event-driven architecture, and input handling.
+3. **AI and API Integration:** Practical experience in connecting language models to real-world interfaces.
+4. **Security Awareness:** Implementing safe execution layers in system-level tools.
 5. **Team Collaboration:** Coordinating development tasks and integrating modular components efficiently.
 
 The resulting product will not only demonstrate technical competence but also serve as a valuable contribution to the open-source Rust ecosystem, potentially inspiring future tools and research into AI-assisted command-line systems.
