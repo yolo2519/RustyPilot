@@ -424,14 +424,14 @@ impl ShellState {
                 
                 // Group consecutive cells with the same style
                 if style == current_style && !contents.is_empty() {
-                    current_text.push_str(contents);
+                    current_text.push_str(&contents);
                 } else {
                     if !current_text.is_empty() {
                         spans.push(Span::styled(current_text.clone(), current_style));
                         current_text.clear();
                     }
                     current_style = style;
-                    current_text.push_str(contents);
+                    current_text.push_str(&contents);
                 }
             }
             
