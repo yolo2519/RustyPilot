@@ -1,0 +1,12 @@
+mod allowlist;
+mod analyzer;
+
+pub use allowlist::Allowlist;
+pub use analyzer::analyze_command;
+
+#[derive(Debug)]
+pub enum CommandSafety {
+    Safe,
+    Warn(String),  // print warning message
+    Block(String), // forbid execution
+}
