@@ -1,3 +1,8 @@
+//! Shell panel rendering for the TUI interface.
+//! 
+//! This module handles rendering of the shell panel, displaying the
+//! shell output, command input, and execution results.
+
 use crate::ui::app::App;
 use ratatui::{
     layout::Rect,

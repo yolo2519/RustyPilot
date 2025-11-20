@@ -1,3 +1,9 @@
+//! Terminal initialization and restoration utilities.
+//! 
+//! This module provides functions to initialize the terminal in raw mode,
+//! set up the alternate screen for TUI rendering, and restore the terminal
+//! to its normal state upon exit.
+
 use std::io::{stdout, Stdout};
 
 use anyhow::Result;

@@ -1,3 +1,9 @@
+//! Main event loop for the TUI application.
+//! 
+//! This module runs the main event loop, handling user input (keyboard events),
+//! rendering the UI, and coordinating between different panels. It manages
+//! the application lifecycle until the user exits.
+
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::Terminal;

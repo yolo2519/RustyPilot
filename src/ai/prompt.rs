@@ -1,3 +1,9 @@
+//! Prompt building utilities for AI requests.
+//! 
+//! This module constructs structured prompts that include user queries
+//! along with relevant context information (working directory, environment,
+//! command history) to provide better AI command suggestions.
+
 use crate::context::ContextSnapshot;
 
 pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> String {

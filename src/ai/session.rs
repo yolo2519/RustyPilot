@@ -1,3 +1,8 @@
+//! AI session management for tracking conversation history.
+//! 
+//! This module manages multiple AI chat sessions, allowing users to maintain
+//! separate conversation contexts and retrieve previous suggestions and interactions.
+
 use std::collections::HashMap;
 
 use super::client::AiCommandSuggestion;

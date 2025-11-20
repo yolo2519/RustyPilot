@@ -1,3 +1,9 @@
+//! Command safety analyzer.
+//! 
+//! This module analyzes commands for potentially dangerous operations,
+//! identifying commands that should be warned about or blocked entirely
+//! (e.g., destructive file operations).
+
 use super::CommandSafety;
 
 pub fn analyze_command(cmd: &str) -> CommandSafety {
