@@ -1,3 +1,8 @@
+//! Current working directory tracking.
+//! 
+//! This module captures and tracks the current working directory
+//! of the shell session, providing context for AI command suggestions.
+
 use std::env;
 
 #[derive(Clone, Default)]

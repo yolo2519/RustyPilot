@@ -1,3 +1,9 @@
+//! Application state management.
+//! 
+//! This module defines the main App struct that holds the global state
+//! including active pane, shell manager, AI sessions, and context manager.
+//! It provides methods for pane switching and state initialization.
+
 use crate::ai::session::AiSessionManager;
 use crate::context::ContextManager;
 use crate::shell::ShellManager;

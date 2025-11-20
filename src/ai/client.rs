@@ -1,3 +1,9 @@
+//! AI client for communicating with OpenAI LLM services.
+//! 
+//! This module handles the core interaction with the OpenAI API,
+//! sending user queries along with context information to get
+//! command suggestions and natural language explanations.
+
 use anyhow::Result;
 use async_openai::{Client, config::OpenAIConfig};
 use serde::{Deserialize, Serialize};

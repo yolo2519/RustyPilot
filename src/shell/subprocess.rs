@@ -1,3 +1,8 @@
+//! Shell subprocess management and command execution.
+//! 
+//! This module manages the shell subprocess lifecycle, sends commands
+//! to the shell, and reads output for display in the UI.
+
 use anyhow::Result;
 pub struct ShellManager;
 

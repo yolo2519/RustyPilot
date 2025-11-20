@@ -1,3 +1,9 @@
+//! Context management for capturing shell environment state.
+//! 
+//! This module collects and provides contextual information about the current
+//! shell session including working directory, environment variables, and command
+//! history to enhance AI command suggestions.
+
 mod cwd;
 mod env;
 mod history;

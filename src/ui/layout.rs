@@ -1,3 +1,9 @@
+//! Layout management for the TUI interface.
+//! 
+//! This module defines the layout structure of the application, splitting
+//! the screen into different sections (shell panel and AI panel) with
+//! configurable sizing and constraints.
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 pub struct Layouts;

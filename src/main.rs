@@ -1,3 +1,8 @@
+//! Main entry point for RustyTerm application.
+//! 
+//! This file initializes the TUI terminal, creates the application state,
+//! runs the main event loop, and handles graceful terminal restoration on exit.
+
 mod ui;
 mod shell;
 mod ai;

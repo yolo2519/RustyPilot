@@ -1,3 +1,8 @@
+//! AI panel rendering for the TUI interface.
+//! 
+//! This module handles rendering of the AI assistant panel, displaying
+//! chat history, command suggestions, and natural language explanations.
+
 use crate::ui::app::App;
 use ratatui::{
     Frame,
