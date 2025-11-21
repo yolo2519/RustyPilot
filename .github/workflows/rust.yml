@@ -28,10 +28,10 @@ jobs:
       run: rustc --version
 
     - name: Build
-      run: cargo build --all --bins --verbose
+      run: cargo build --workspace --all-targets --verbose
     
     - name: Clippy (deny unwrap/expect)
-      run: cargo clippy --workspace --exclude examples -- -D warnings -D clippy::unwrap_used -D clippy::expect_used
+      run: cargo clippy --workspace -- -D clippy::unwrap_used -D clippy::expect_used
 
     - name: Run tests
-      run: cargo test --workspace --verbose
+      run: cargo test --workspace --all-targets --verbose
