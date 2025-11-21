@@ -1,5 +1,5 @@
 //! AI session management for tracking conversation history.
-//! 
+//!
 //! This module manages multiple AI chat sessions, allowing users to maintain
 //! separate conversation contexts and retrieve previous suggestions and interactions.
 
@@ -39,16 +39,12 @@ impl AiSessionManager {
         manager
     }
 
-    pub fn current_session(&self) -> &AiSession {
-        self.sessions
-            .get(&self.current_id)
-            .expect("current session must exist")
+    pub fn current_session(&self) -> Option<&AiSession> {
+        self.sessions.get(&self.current_id)
     }
 
-    pub fn current_session_mut(&mut self) -> &mut AiSession {
-        self.sessions
-            .get_mut(&self.current_id)
-            .expect("current session must exist")
+    pub fn current_session_mut(&mut self) -> Option<&mut AiSession> {
+        self.sessions.get_mut(&self.current_id)
     }
 
     pub fn new_session(&mut self) -> SessionId {
