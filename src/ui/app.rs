@@ -1,5 +1,5 @@
 //! Application state management.
-//! 
+//!
 //! This module defines the main App struct that holds the global state
 //! including active pane, shell manager, AI sessions, and context manager.
 //! It provides methods for pane switching and state initialization.
@@ -23,10 +23,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Result<Self> {
+    pub fn new(cols: u16, rows: u16) -> Result<Self> {
         Ok(Self {
             active_pane: ActivePane::Shell,
-            shell_manager: ShellManager::new()?,
+            shell_manager: ShellManager::new(cols, rows)?,
             ai_sessions: AiSessionManager::new(),
             context_manager: ContextManager::new(),
         })

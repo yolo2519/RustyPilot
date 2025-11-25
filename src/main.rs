@@ -8,27 +8,33 @@ mod shell;
 mod ai;
 mod context;
 mod security;
+mod shell;
+mod ui;
 mod utils;
 
 use anyhow::Result;
 use ui::app::App;
+use ui::layout::calculate_shell_size;
 use ui::terminal;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 初始化日志（可选）
+    // initialize logging
     utils::logger::init_logging();
 
-    // 初始化终端 TUI
+    // initialize terminal TUI
     let mut terminal = terminal::init_terminal()?;
 
-    // 初始化应用状态
-    let mut app = App::new()?;
+    // initialize app state
+    let size = terminal.size()?;
+    let (shell_cols, shell_rows) = calculate_shell_size(size.width, size.height);
 
-    // 主事件循环（同步 or 异步都可以，这里预留异步接口）
+    let mut app = App::new(shell_cols, shell_rows)?;
+
+    // main event loop (sync or async, here we leave the async interface)
     ui::event_loop::run(&mut terminal, &mut app).await?;
 
-    // 恢复终端
+    // restore terminal
     terminal::restore_terminal()?;
     Ok(())
 }
