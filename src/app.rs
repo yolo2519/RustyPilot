@@ -40,6 +40,7 @@ pub struct App {
     #[allow(unused, reason = "Will be used later")]
     context_manager: ContextManager,
     exit: bool,
+    command_mode: bool,
 }
 
 impl App {
@@ -52,6 +53,7 @@ impl App {
             active_pane: ActivePane::Terminal,
             context_manager: ContextManager::new(),
             exit: false,
+            command_mode: false,
         })
     }
 
@@ -69,19 +71,59 @@ impl App {
         };
         self.switch_pane(next);
     }
+
+    pub fn get_command_mode(&self) -> bool {
+        self.command_mode
+    }
+
+    pub fn set_command_mode(&mut self, flag: bool) {
+        self.command_mode = flag;
+    }
+
+    pub fn toggle_command_mode(&mut self) {
+        self.command_mode = !self.command_mode;
+    }
+
     fn handle_events(&mut self) -> Result<()> {
         if !event::poll(Duration::ZERO)? {
             return Ok(());
         }
+
+        if self.command_mode {
+            self.handle_command_mode_events(event::read()?);
+            return Ok(());
+        }
         match event::read()? {
             Event::Key(key_evt) if matches!(key_evt.kind, KeyEventKind::Press) => {
+                // mock event: Ctrl + C => Exit
                 if key_evt.modifiers.contains(KeyModifiers::CONTROL) && matches!(key_evt.code, KeyCode::Char('c')) {
                     self.exit = true;
+                }
+                // mock event: Ctrl + B => Command Mode
+                if key_evt.modifiers.contains(KeyModifiers::CONTROL) && matches!(key_evt.code, KeyCode::Char('b')) {
+                    self.set_command_mode(true);
                 }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    fn handle_command_mode_events(&mut self, event: Event) {
+        assert!(self.command_mode);
+        use Event::*;
+        match event {
+            // mock event: n => toggle pane
+            Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('n')) => {
+                self.toggle_pane();
+            }
+            // mock event: c => exit
+            Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('c')) => {
+                self.exit = true;
+            }
+            _ => {},
+        }
+        self.set_command_mode(false);
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {

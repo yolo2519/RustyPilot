@@ -26,7 +26,10 @@ impl Widget for &TuiTerminal {
         // TODO: this is mocking, implement this
         let fake_terminal_output = vec![
             Line::from("Terminal will be here."),
-            Line::from("Press Ctrl + C to exit...")
+            Line::from("[DEBUG] Press Ctrl + C to exit."),
+            Line::from("[DEBUG] Press Ctrl + B to enter Command Mode"),
+            Line::from("[DEBUG] In command mode: Press N to toggle active pane."),
+            Line::from("[DEBUG] In command mode: Press C to exit."),
         ];
         let paragraph = Paragraph::new(fake_terminal_output);
         paragraph.render(area, buf);
