@@ -1,5 +1,5 @@
 //! Command allowlist management.
-//! 
+//!
 //! This module maintains a list of allowed command prefixes that can be
 //! executed without additional security warnings or blocks.
 

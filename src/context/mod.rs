@@ -1,5 +1,5 @@
 //! Context management for capturing shell environment state.
-//! 
+//!
 //! This module collects and provides contextual information about the current
 //! shell session including working directory, environment variables, and command
 //! history to enhance AI command suggestions.
@@ -36,7 +36,7 @@ impl ContextManager {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ContextSnapshot {
     pub cwd: String,
     pub env_vars: Vec<(String, String)>,
