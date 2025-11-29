@@ -1,5 +1,5 @@
 //! Prompt building utilities for AI requests.
-//! 
+//!
 //! This module constructs structured prompts that include user queries
 //! along with relevant context information (working directory, environment,
 //! command history) to provide better AI command suggestions.

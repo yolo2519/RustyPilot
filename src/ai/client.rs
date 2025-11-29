@@ -1,5 +1,5 @@
 //! AI client for communicating with OpenAI LLM services.
-//! 
+//!
 //! This module handles the core interaction with the OpenAI API,
 //! sending user queries along with context information to get
 //! command suggestions and natural language explanations.
@@ -42,9 +42,9 @@ impl AiClient {
         // 2. self.client.chat().create(...) / create_stream(...)
         // 3. parse to AiCommandSuggestion
 
-        // 先返回 dummy，保证架子能编译跑起来
+        // TODO: this returns a dummy suggestion now
         Ok(AiCommandSuggestion {
-            natural_language_explanation: "Dummy explanation".to_string(),
+            natural_language_explanation: format!("Based on your query [{user_query}] and context [{ctx:?}] I would suggest this command."),
             suggested_command: "echo 'hello world'".to_string(),
             alternatives: vec![],
         })

@@ -1,5 +1,5 @@
 //! Command history tracking and storage.
-//! 
+//!
 //! This module maintains a history of executed commands, allowing the AI
 //! to provide suggestions based on recent command patterns and context.
 

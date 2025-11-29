@@ -1,33 +1,34 @@
-//! Terminal initialization and restoration utilities.
-//! 
-//! This module provides functions to initialize the terminal in raw mode,
-//! set up the alternate screen for TUI rendering, and restore the terminal
-//! to its normal state upon exit.
+use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Widget;
+use ratatui::prelude::Rect;
+use ratatui::prelude::Buffer;
 
-use std::io::{stdout, Stdout};
-
-use anyhow::Result;
-use crossterm::{
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
-
-pub type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
-
-pub fn init_terminal() -> Result<TuiTerminal> {
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-    Ok(terminal)
+pub struct TuiTerminal {
+    // TODO: implement this
 }
 
-pub fn restore_terminal() -> Result<()> {
-    disable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, LeaveAlternateScreen)?;
-    Ok(())
+impl TuiTerminal {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Default for TuiTerminal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Widget for &TuiTerminal {
+    fn render(self, area: Rect, buf: &mut Buffer)
+    {
+        // TODO: this is mocking, implement this
+        let fake_terminal_output = vec![
+            Line::from("Terminal will be here."),
+            Line::from("Press Ctrl + C to exit...")
+        ];
+        let paragraph = Paragraph::new(fake_terminal_output);
+        paragraph.render(area, buf);
+    }
 }
