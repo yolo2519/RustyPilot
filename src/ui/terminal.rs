@@ -3,22 +3,26 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::prelude::Rect;
 use ratatui::prelude::Buffer;
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::Sender;
+
+use crate::event::AppEvent;
 
 pub struct TuiTerminal {
     // TODO: implement this
+    _pty_output: Receiver<Vec<u8>>,
+    _event_sink: Sender<AppEvent>,
 }
 
 impl TuiTerminal {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(pty_output: Receiver<Vec<u8>>, event_sink: Sender<AppEvent>) -> Self {
+        Self {
+            _pty_output: pty_output,
+            _event_sink: event_sink,
+        }
     }
 }
 
-impl Default for TuiTerminal {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl Widget for &TuiTerminal {
     fn render(self, area: Rect, buf: &mut Buffer)
