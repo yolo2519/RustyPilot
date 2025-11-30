@@ -4,18 +4,20 @@
 //! including active pane, shell manager, AI sessions, and context manager.
 //! It provides methods for pane switching and state initialization.
 
-use std::time::Duration;
 
-use crate::ai::session::AiSessionManager;
+use crate::event::{AppEvent, init_app_eventsource, init_user_event};
+use crate::{ai::session::AiSessionManager, event::UserEvent};
 use crate::context::ContextManager;
 use crate::shell::ShellManager;
 use crate::ui::assistant::TuiAssistant;
 use crate::ui::terminal::TuiTerminal;
 
-use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::DefaultTerminal;
 
+use anyhow::{Context, Result};
+use ratatui::DefaultTerminal;
+use tokio::sync::mpsc::Receiver;
+
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivePane {
@@ -29,31 +31,40 @@ pub struct App {
     shell_manager: ShellManager,
     #[allow(unused, reason = "Will be used later")]
     ai_sessions: AiSessionManager,
+    #[allow(unused, reason = "Will be used later")]
+    context_manager: ContextManager,
 
     // frontend widgets
     // they are public to ui module
-    pub(in super) tui_terminal: TuiTerminal,
-    pub(in super) tui_assistant: TuiAssistant,
+    pub(in super) tui_terminal: TuiTerminal,  // Terminal widget
+    pub(in super) tui_assistant: TuiAssistant,  // Assistant widget
 
     // App State
-    active_pane: ActivePane,
-    #[allow(unused, reason = "Will be used later")]
-    context_manager: ContextManager,
-    exit: bool,
-    command_mode: bool,
+    active_pane: ActivePane,  // Which pane is active? (Terminal/Assistant)
+
+    exit: bool,  // Should the app exit?
+    command_mode: bool,  // Is the app in the command mode?
+
+    // events sources
+    user_events: Receiver<std::io::Result<UserEvent>>,  // User input
+    app_events: Receiver<AppEvent>,  // App Events
 }
 
 impl App {
     pub fn new() -> Result<Self> {
+        let (event_sink, app_events) = init_app_eventsource();
+        let (shell, pty_rx) = ShellManager::new(event_sink.clone())?;
         Ok(Self {
-            shell_manager: ShellManager::new()?,
+            shell_manager: shell,
             ai_sessions: AiSessionManager::new(),
-            tui_terminal: TuiTerminal::new(),
+            tui_terminal: TuiTerminal::new(pty_rx, event_sink.clone()),
             tui_assistant: TuiAssistant::new(),
             active_pane: ActivePane::Terminal,
             context_manager: ContextManager::new(),
             exit: false,
             command_mode: false,
+            user_events: init_user_event(),
+            app_events
         })
     }
 
@@ -84,17 +95,48 @@ impl App {
         self.command_mode = !self.command_mode;
     }
 
-    fn handle_events(&mut self) -> Result<()> {
-        if !event::poll(Duration::ZERO)? {
-            return Ok(());
-        }
 
+
+    pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        loop {
+            if self.exit {
+                break Ok(());
+            }
+            tokio::select! {
+                res = self.user_events.recv() => {
+                    let usr_evt = res.with_context(|| anyhow::anyhow!("User event stream is ended."))?;
+                    self.handle_user_event(usr_evt?)?;
+                }
+                res = self.app_events.recv() => {
+                    // TODO: handle these events
+                    let app_evt = res.with_context(|| anyhow::anyhow!("App event stream is ended"))?;
+                    self.handle_app_event(app_evt)?;
+                }
+                // _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+            self.draw(terminal)?;
+        }
+    }
+
+    pub fn draw(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        terminal.draw(|frame| {
+            let area = frame.area();
+            frame.render_widget(&*self, area);
+        })?;
+        Ok(())
+    }
+}
+
+
+impl App {
+
+    fn handle_user_event(&mut self, event: UserEvent) -> Result<()>  {
         if self.command_mode {
-            self.handle_command_mode_events(event::read()?);
+            self.handle_command_mode_events(event)?;
             return Ok(());
         }
-        match event::read()? {
-            Event::Key(key_evt) if matches!(key_evt.kind, KeyEventKind::Press) => {
+        match event {
+            UserEvent::Key(key_evt) if matches!(key_evt.kind, KeyEventKind::Press) => {
                 // mock event: Ctrl + C => Exit
                 if key_evt.modifiers.contains(KeyModifiers::CONTROL) && matches!(key_evt.code, KeyCode::Char('c')) {
                     self.exit = true;
@@ -109,32 +151,31 @@ impl App {
         Ok(())
     }
 
-    fn handle_command_mode_events(&mut self, event: Event) {
+    fn handle_command_mode_events(&mut self, event: UserEvent) -> Result<()> {
         assert!(self.command_mode);
-        use Event::*;
+
         match event {
             // mock event: n => toggle pane
-            Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('n')) => {
+            UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('n')) => {
                 self.toggle_pane();
             }
             // mock event: c => exit
-            Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('c')) => {
+            UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('c')) => {
                 self.exit = true;
             }
-            _ => {},
+            _ => {
+                return Ok(());
+                // don't allow other ignored events to exit command mode
+            },
         }
         self.set_command_mode(false);
+        Ok(())
     }
+}
 
-    pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        // TODO: main loop of App::run
-        while !self.exit {
-            self.handle_events()?;
-            terminal.draw(|frame| {
-                let area = frame.area();
-                frame.render_widget(&*self, area);
-            })?;
-        }
+impl App {
+    fn handle_app_event(&mut self, _event: AppEvent) -> Result<()> {
+        // TODO: implement event handler
         Ok(())
     }
 }
