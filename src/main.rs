@@ -10,17 +10,20 @@ pub mod context;
 pub mod security;
 pub mod utils;
 pub mod app;
+pub mod event;
 
 use anyhow::Result;
 use app::App;
 
+use crate::utils::context::Context;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
-
+    let _ctx = Context::with(|| ratatui::restore());
     let mut app = App::new()?;
-    let app_result = app.run(&mut terminal).await;
-
-    ratatui::restore();
-    app_result
+    // draw 1st frame
+    app.draw(&mut terminal)?;
+    // run event-driven main loop of app
+    app.run(&mut terminal).await
 }
