@@ -12,10 +12,18 @@
 //!
 //! The separation allows the UI to remain responsive even when processing
 //! intensive operations, as user input is always handled promptly.
+//!
+//! # Submodules
+//!
+//! - `assistant`: Key event handling for the AI Assistant pane
+//! - `terminal`: Key event handling for the Terminal pane
+
+pub mod assistant;
+pub mod terminal;
 
 use std::thread;
 
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, UnboundedSender, UnboundedReceiver};
 use std::io::Result;
 
 /// Type alias for user input events from the terminal.
@@ -52,6 +60,40 @@ pub fn init_user_event() -> Receiver<Result<UserEvent>> {
     rx
 }
 
+use crate::ai::session::SessionId;
+
+// =============================================================================
+// AI Stream Data (Dedicated Channel)
+// =============================================================================
+
+/// Data transmitted through the dedicated AI streaming channel.
+///
+/// This is separate from AppEvent because:
+/// 1. Streaming chunks are high-frequency and should not flood the global event queue
+/// 2. TuiAssistant is the only consumer of stream data
+/// 3. End-of-stream must be in the same channel to preserve ordering with chunks
+#[derive(Debug, Clone)]
+pub enum AiStreamData {
+    /// A chunk of text from the streaming response
+    Chunk {
+        session_id: SessionId,
+        text: String,
+    },
+    /// The streaming response has completed
+    End {
+        session_id: SessionId,
+    },
+    /// An error occurred during streaming
+    Error {
+        session_id: SessionId,
+        error: String,
+    },
+}
+
+// =============================================================================
+// Application Events (Global Event Channel)
+// =============================================================================
+
 /// Application-wide events for inter-component communication.
 ///
 /// This enum defines events that can be sent between different parts of the
@@ -62,27 +104,61 @@ pub fn init_user_event() -> Receiver<Result<UserEvent>> {
 ///
 /// This enum is marked as `#[non_exhaustive]` to allow adding new event types
 /// in the future without breaking existing code.
+///
+/// # Design Note
+///
+/// High-frequency streaming data (AI chunks, shell output) uses dedicated channels
+/// instead of AppEvent to avoid flooding this queue. AppEvent is reserved for
+/// low-frequency coordination events.
 #[non_exhaustive]
 pub enum AppEvent {
-    // TODO: Add specific event types as needed
+    // =========================================================================
+    // AI Events (Low-frequency, requires App-level handling)
+    // =========================================================================
+
+    /// AI has suggested a command that needs user confirmation.
+    /// This is sent after streaming completes and the response is parsed.
+    AiCommandSuggestion {
+        session_id: SessionId,
+        command: String,
+        explanation: String,
+    },
+
+    /// User has confirmed execution of the AI-suggested command.
+    /// Backend should retrieve the command from session and inject it into the shell.
+    ExecuteAiCommand {
+        session_id: SessionId,
+    },
+
+    // =========================================================================
+    // Shell Events
+    // =========================================================================
+
+    /// Shell command execution completed
+    ShellCommandCompleted {
+        command: String,
+        exit_code: i32,
+    },
 }
 
 /// Initializes the application event system.
 ///
-/// Creates a channel pair for application-wide event communication. The sender
-/// can be cloned and distributed to various components that need to emit events,
-/// while the receiver is typically handled by the main application loop.
+/// Creates an unbounded channel pair for application-wide event communication.
+/// Unbounded is appropriate here because:
+/// 1. AppEvent is low-frequency (command suggestions, completions, etc.)
+/// 2. We need to send from within async contexts without blocking
+/// 3. The event types are lightweight and won't cause memory issues
 ///
 /// # Returns
 ///
 /// A tuple containing:
-/// - `Sender<AppEvent>`: For sending application events (can be cloned)
-/// - `Receiver<AppEvent>`: For receiving and processing application events
+/// - `UnboundedSender<AppEvent>`: For sending application events (can be cloned)
+/// - `UnboundedReceiver<AppEvent>`: For receiving and processing application events
 ///
 /// # Usage
 ///
 /// The sender should be passed to components that need to emit events,
 /// while the receiver is used in the main event loop to handle these events.
-pub fn init_app_eventsource() -> (Sender<AppEvent>, Receiver<AppEvent>) {
-    mpsc::channel(2048)
+pub fn init_app_eventsource() -> (UnboundedSender<AppEvent>, UnboundedReceiver<AppEvent>) {
+    mpsc::unbounded_channel()
 }

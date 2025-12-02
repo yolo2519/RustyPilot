@@ -4,6 +4,11 @@
 //! separate conversation contexts and retrieve previous suggestions and interactions.
 
 use std::collections::HashMap;
+use std::time::Duration;
+
+use tokio::sync::mpsc::{Sender, UnboundedSender};
+
+use crate::event::{AiStreamData, AppEvent};
 
 use super::client::AiCommandSuggestion;
 
@@ -19,14 +24,18 @@ pub struct AiSessionManager {
     sessions: HashMap<SessionId, AiSession>,
     current_id: SessionId,
     next_id: SessionId,
+    ai_stream_tx: Sender<AiStreamData>,
+    app_event_tx: UnboundedSender<AppEvent>,
 }
 
 impl AiSessionManager {
-    pub fn new() -> Self {
+    pub fn new(ai_stream_tx: Sender<AiStreamData>, app_event_tx: UnboundedSender<AppEvent>) -> Self {
         let mut manager = Self {
             sessions: HashMap::new(),
             current_id: 1,
             next_id: 2,
+            ai_stream_tx,
+            app_event_tx,
         };
         manager.sessions.insert(
             1,
@@ -47,6 +56,27 @@ impl AiSessionManager {
         self.sessions.get_mut(&self.current_id)
     }
 
+    pub fn current_session_id(&self) -> SessionId {
+        self.current_id
+    }
+
+    /// Get the last command suggestion for a session, if any
+    pub fn get_last_suggestion(&self, session_id: SessionId) -> Option<&AiCommandSuggestion> {
+        self.sessions
+            .get(&session_id)
+            .and_then(|s| s.last_suggestion.as_ref())
+    }
+
+    /// Execute the suggested command for a session.
+    /// This sends an ExecuteAiCommand event to the app layer.
+    pub fn execute_suggestion(&self, session_id: SessionId) -> anyhow::Result<()> {
+        // Verify that there's a suggestion to execute
+        if self.get_last_suggestion(session_id).is_some() {
+            self.app_event_tx.send(AppEvent::ExecuteAiCommand { session_id })?;
+        }
+        Ok(())
+    }
+
     pub fn new_session(&mut self) -> SessionId {
         let id = self.next_id;
         self.next_id += 1;
@@ -60,5 +90,72 @@ impl AiSessionManager {
         );
         self.current_id = id;
         id
+    }
+
+    /// Send a message to the AI and receive a streaming response.
+    /// TODO
+    /// WARN(cursor): This is a fake implementation for debugging.
+    /// It simulates streaming by sending chunks with delays.
+    /// Replace with real AI API integration later.
+    pub fn send_message(&mut self, session_id: SessionId, user_input: &str) {
+        // Store in history
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.history.push(format!("user: {}", user_input));
+        }
+
+        // Clone what we need for the async task
+        let stream_tx = self.ai_stream_tx.clone();
+        let event_tx = self.app_event_tx.clone();
+        let input = user_input.to_string();
+
+        // Spawn async task to simulate streaming response
+        tokio::spawn(async move {
+            // WARN(cursor): Fake streaming response for debugging
+            let response = format!(
+                "(This is a fake response) You typed \"{}\", so I suggest running a command to help you.",
+                input
+            );
+
+            // Simulate streaming by sending character by character with delays
+            for chunk in response.chars().collect::<Vec<_>>().chunks(3) {
+                let text: String = chunk.iter().collect();
+                let _ = stream_tx
+                    .send(AiStreamData::Chunk {
+                        session_id,
+                        text,
+                    })
+                    .await;
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+
+            // End the stream
+            let _ = stream_tx.send(AiStreamData::End { session_id }).await;
+
+            // After a short delay, send a command suggestion
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // WARN(cursor): Fake command suggestion.
+            let command = "echo 'Hello from AI suggestion!'".to_string();
+            let explanation = "A test command to verify the suggestion feature".to_string();
+
+            // Send as AppEvent so it creates a proper command card
+            // Note: UnboundedSender::send() is synchronous, no .await needed
+            let _ = event_tx
+                .send(AppEvent::AiCommandSuggestion {
+                    session_id,
+                    command: command.clone(),
+                    explanation: explanation.clone(),
+                });
+        });
+
+        // Store the suggestion in the session (do this synchronously before spawning)
+        // Note: In the real implementation, this should be done after parsing the AI response
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.last_suggestion = Some(AiCommandSuggestion {
+                natural_language_explanation: "A test command to verify the suggestion feature".to_string(),
+                suggested_command: "echo 'Hello from AI suggestion!'".to_string(),
+                alternatives: vec![],
+            });
+        }
     }
 }
