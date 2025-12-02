@@ -161,10 +161,13 @@ impl App {
                         terminal_event::handle_key_event(&mut self.tui_terminal, &mut self.shell_manager, key_evt)?;
                     }
                     ActivePane::Assistant => {
+                        // Get current context snapshot for AI requests
+                        let context = self.context_manager.snapshot();
                         assistant_event::handle_key_event(
                             &mut self.tui_assistant,
                             &mut self.ai_sessions,
                             key_evt,
+                            context,
                         )?;
                     }
                 }
