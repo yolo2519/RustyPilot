@@ -3,75 +3,183 @@
 //! This module manages the shell subprocess lifecycle, sends commands
 //! to the shell, and reads output for display in the UI.
 
+use std::io::Write;
+use std::sync::Arc;
+use std::sync::Mutex;
+
 use anyhow::Result;
-use tokio::sync::mpsc::{self, Sender, Receiver, UnboundedSender};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use tokio::sync::mpsc::{self, Receiver, UnboundedSender};
 
 use crate::event::AppEvent;
-pub struct ShellManager {
-    _event_sink: UnboundedSender<AppEvent>,   // Handle for sending message back to App, may be useful
-    pty_output: Sender<Vec<u8>>,    // Handle for sending bytes from pty reader to terminal
 
-    // NOTE(yushun.tang): I'm not sure if ShellManager should hold these handles,
-    // maybe you want to send it to another thread that will be working on reading data from pty reader.
-    // totally depends on your implementation.
-    // The pty_output will be used to send chunks of bytes directly
-    // to terminal renderer
-    // the event_sink will be used to inform main App something, but I'm not sure now.
-    // For example, we may want to tell App that "we have read + sent some bytes from pty reader,
-    // and likely the terminal is going to be updated" in event-driven design.
+// Channel buffer sizes
+const PTY_OUTPUT_BUFFER: usize = 1024;  // Can buffer ~1-5MB data for smooth rendering
+const PTY_READ_BUFFER: usize = 16384;   // 16KB per read for good throughput
+
+/// Manages the shell subprocess using a PTY.
+pub struct ShellManager {
+    #[allow(unused)]
+    event_sink: UnboundedSender<AppEvent>,
+    pty_master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
 }
 
 impl ShellManager {
-    pub fn new(event_sink: UnboundedSender<AppEvent>) -> Result<(Self, Receiver<Vec<u8>>)> {
-        // TODO: use portable_pty / tokio::process to implement real shell logic
+    /// Creates a new shell manager with a PTY of the specified size.
+    ///
+    /// # Arguments
+    /// * `event_sink` - Channel for sending app events (e.g., shell errors)
+    /// * `cols` - Terminal width in columns
+    /// * `rows` - Terminal height in rows
+    ///
+    /// # Returns
+    /// A tuple of (ShellManager, Receiver for PTY output)
+    pub fn new(
+        event_sink: UnboundedSender<AppEvent>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(Self, Receiver<Vec<u8>>)> {
+        let pty_system = native_pty_system();
 
-        // TODO: we may need to have a convention on how many bytes
-        //       we can send using a single Vec<u8> to balance latency and throughput
-        let (tx, rx) = mpsc::channel(1024);
-        // at here we spawn reader thread, pty, ...
+        // Create PTY with specified size
+        let pair = pty_system.openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+
+        // Spawn shell from $SHELL environment variable, fallback to default
+        let shell_cmd = std::env::var("SHELL").unwrap_or_else(|_| {
+            if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+                "/bin/zsh".to_string()
+            } else {
+                "/bin/bash".to_string()
+            }
+        });
+
+        let mut cmd = CommandBuilder::new(&shell_cmd);
+        cmd.env("TERM", "xterm-256color");
+        
+        // Inherit current working directory
+        if let Ok(cwd) = std::env::current_dir() {
+            cmd.cwd(cwd);
+        }
+
+        let _child = pair.slave.spawn_command(cmd)?;
+
+        // Drop slave side in parent process
+        drop(pair.slave);
+        
+        // Note: We don't need to keep _child alive because the PTY will remain open
+        // as long as pty_master exists. The child process will exit when the PTY closes.
+
+        let reader = pair.master.try_clone_reader()?;
+        let pty_master = Arc::new(Mutex::new(pair.master));
+
+        // Create channel for PTY output
+        let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>(PTY_OUTPUT_BUFFER);
+
+        // Clone event sink for reader thread
+        let event_sink_clone = event_sink.clone();
+
+        // Spawn reader thread
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut buf = [0u8; PTY_READ_BUFFER];
+
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        // EOF: shell exited
+                        let _ = event_sink_clone.send(AppEvent::ShellError {
+                            message: "Shell process exited".to_string(),
+                        });
+                        break;
+                    }
+                    Ok(n) => {
+                        let data = buf[..n].to_vec();
+                        // Use blocking_send since we're in a std::thread
+                        if output_tx.blocking_send(data).is_err() {
+                            // Receiver dropped, exit thread
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        // IO error
+                        if e.kind() != std::io::ErrorKind::Interrupted {
+                            let _ = event_sink_clone.send(AppEvent::ShellError {
+                                message: format!("PTY read error: {}", e),
+                            });
+                            break;
+                        }
+                        // Interrupted errors are non-fatal, continue
+                    }
+                }
+            }
+        });
+
         Ok((
             Self {
-                _event_sink: event_sink,
-                pty_output: tx,
+                event_sink,
+                pty_master,
             },
-            rx
+            output_rx,
         ))
     }
 
-    /// Handle user input - for dummy implementation, echo it to pty_output
-    pub fn handle_user_input(&mut self, input: &str) -> Result<()> {
-        // Dummy: Echo user input to pty_output stream
-        // TODO: this is fake
-        let output = input.to_string();
-        let tx = self.pty_output.clone();
-        // in the real implementation the pty_writer's write method will be called so there should
-        // be no futures. If the writer could be async, we will have to refactor our tokio::select
-        tokio::spawn( async move {
-            #[allow(clippy::unwrap_used, reason = "This is a fake implementation")]
-            tx.send(output.into_bytes()).await.unwrap();
-        });
+    /// Handles user input by writing it to the PTY.
+    ///
+    /// # Arguments
+    /// * `data` - Raw bytes to send to the shell
+    pub fn handle_user_input(&mut self, data: &[u8]) -> Result<()> {
+        let writer = self.pty_master.lock().map_err(|e| {
+            anyhow::anyhow!("Failed to lock PTY master: {}", e)
+        })?;
+        
+        let mut pty_writer = writer.take_writer()?;
+        pty_writer.write_all(data)?;
+        pty_writer.flush()?;
         Ok(())
     }
 
-    /// Inject a command into the shell as if the user typed it.
-    /// This will append the command to the PTY input buffer and execute it.
+    /// Injects a command into the shell as if the user typed it and pressed Enter.
+    ///
+    /// # Arguments
+    /// * `cmd` - Command string to execute
     pub fn inject_command(&mut self, cmd: &str) -> Result<()> {
-        // Dummy: Echo the command to pty_output stream
-        // TODO: this is fake
-        let tx = self.pty_output.clone();
-        let cmd = cmd.to_string();
-        // in the real implementation the pty_writer's write method will be called so there should
-        // be no futures. If the writer could be async, we will have to refactor our tokio::select
-        tokio::spawn( async move {
-            #[allow(clippy::unwrap_used, reason = "This is a fake implementation")]
-            tx.send(cmd.into_bytes()).await.unwrap();
-        });
+        let writer = self.pty_master.lock().map_err(|e| {
+            anyhow::anyhow!("Failed to lock PTY master: {}", e)
+        })?;
+        
+        let mut pty_writer = writer.take_writer()?;
+        
+        // Write command
+        pty_writer.write_all(cmd.as_bytes())?;
+        // Add newline to execute
+        pty_writer.write_all(b"\n")?;
+        pty_writer.flush()?;
+        
         Ok(())
     }
 
-    // TODO: read output from shell
-    pub fn read_output(&mut self) -> Result<Option<String>> {
-        // TODO: do it later
-        Ok(None)
+    /// Resizes the PTY to the specified dimensions.
+    ///
+    /// # Arguments
+    /// * `cols` - New terminal width in columns
+    /// * `rows` - New terminal height in rows
+    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        let pty = self.pty_master.lock().map_err(|e| {
+            anyhow::anyhow!("Failed to lock PTY master: {}", e)
+        })?;
+        
+        pty.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+        
+        Ok(())
     }
 }
