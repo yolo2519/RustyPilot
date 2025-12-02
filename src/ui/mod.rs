@@ -16,7 +16,14 @@ pub mod terminal;
 
 impl Widget for &App {
     fn render(self, area: ratatui::prelude::Rect, buf: &mut ratatui::prelude::Buffer) {
+        let _ = self.render_with_info(area, buf);
+    }
+}
 
+impl App {
+    /// Renders the app and returns terminal area and cursor visibility.
+    /// Returns: (terminal_area, should_show_cursor)
+    pub(crate) fn render_with_info(&self, area: Rect, buf: &mut Buffer) -> (Rect, bool) {
         // Split into three chunks: terminal, separator, assistant
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -74,6 +81,11 @@ impl Widget for &App {
         if self.get_command_mode() {
             render_command_mode_hint(area, buf, cmdmode_color);
         }
+
+        // Determine if cursor should be shown
+        let should_show_cursor = matches!(active, ActivePane::Terminal) && !self.get_command_mode();
+        
+        (term_area, should_show_cursor)
     }
 }
 

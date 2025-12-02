@@ -44,6 +44,9 @@ pub struct App {
     exit: bool,  // Should the app exit?
     command_mode: bool,  // Is the app in the command mode?
 
+    // Terminal size tracking for resize detection
+    last_terminal_size: Option<(u16, u16)>,  // (cols, rows)
+
     // events sources
     user_events: Receiver<std::io::Result<UserEvent>>,  // User input
     app_events: UnboundedReceiver<AppEvent>,  // App Events
@@ -71,6 +74,7 @@ impl App {
             context_manager: ContextManager::new(),
             exit: false,
             command_mode: false,
+            last_terminal_size: None,
             user_events: init_user_event(),
             app_events,
         })
@@ -131,10 +135,50 @@ impl App {
     }
 
     pub fn draw(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        // Store cursor info and terminal area for later use
+        let mut cursor_info: Option<(u16, u16, u16, u16)> = None; // (x, y, cols, rows)
+        
         terminal.draw(|frame| {
             let area = frame.area();
-            frame.render_widget(&*self, area);
+            
+            // Render the app
+            let (term_area, should_show_cursor) = self.render_with_info(area, frame.buffer_mut());
+            
+            // Store cursor position relative to terminal area if Terminal pane is active
+            if should_show_cursor {
+                let (cursor_row, cursor_col) = self.tui_terminal.cursor_position();
+                cursor_info = Some((
+                    term_area.x + cursor_col,
+                    term_area.y + cursor_row,
+                    term_area.width,
+                    term_area.height,
+                ));
+            }
         })?;
+        
+        // Handle terminal resize outside of draw closure
+        if let Some((_, _, cols, rows)) = cursor_info {
+            let needs_resize = self.last_terminal_size
+                .map(|(last_cols, last_rows)| last_cols != cols || last_rows != rows)
+                .unwrap_or(true);
+            
+            if needs_resize {
+                self.tui_terminal.resize(cols, rows);
+                if let Err(e) = self.shell_manager.resize(cols, rows) {
+                    eprintln!("Failed to resize PTY: {}", e);
+                }
+                self.last_terminal_size = Some((cols, rows));
+            }
+        }
+        
+        // Set cursor position and visibility after draw
+        if let Some((x, y, _, _)) = cursor_info {
+            terminal.show_cursor()?;
+            terminal.set_cursor_position((x, y))?;
+        } else {
+            terminal.hide_cursor()?;
+        }
+        
         Ok(())
     }
 }
