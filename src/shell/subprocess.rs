@@ -22,6 +22,7 @@ pub struct ShellManager {
     #[allow(unused)]
     event_sink: UnboundedSender<AppEvent>,
     pty_master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    pty_writer: Arc<Mutex<Box<dyn Write + Send>>>,
 }
 
 impl ShellManager {
@@ -75,7 +76,9 @@ impl ShellManager {
         // as long as pty_master exists. The child process will exit when the PTY closes.
 
         let reader = pair.master.try_clone_reader()?;
+        let pty_writer = pair.master.take_writer()?;
         let pty_master = Arc::new(Mutex::new(pair.master));
+        let pty_writer = Arc::new(Mutex::new(pty_writer));
 
         // Create channel for PTY output
         let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>(PTY_OUTPUT_BUFFER);
@@ -123,6 +126,7 @@ impl ShellManager {
             Self {
                 event_sink,
                 pty_master,
+                pty_writer,
             },
             output_rx,
         ))
@@ -133,11 +137,10 @@ impl ShellManager {
     /// # Arguments
     /// * `data` - Raw bytes to send to the shell
     pub fn handle_user_input(&mut self, data: &[u8]) -> Result<()> {
-        let writer = self.pty_master.lock().map_err(|e| {
-            anyhow::anyhow!("Failed to lock PTY master: {}", e)
+        let mut pty_writer = self.pty_writer.lock().map_err(|e| {
+            anyhow::anyhow!("Failed to lock PTY writer: {}", e)
         })?;
         
-        let mut pty_writer = writer.take_writer()?;
         pty_writer.write_all(data)?;
         pty_writer.flush()?;
         Ok(())
@@ -148,11 +151,9 @@ impl ShellManager {
     /// # Arguments
     /// * `cmd` - Command string to execute
     pub fn inject_command(&mut self, cmd: &str) -> Result<()> {
-        let writer = self.pty_master.lock().map_err(|e| {
-            anyhow::anyhow!("Failed to lock PTY master: {}", e)
+        let mut pty_writer = self.pty_writer.lock().map_err(|e| {
+            anyhow::anyhow!("Failed to lock PTY writer: {}", e)
         })?;
-        
-        let mut pty_writer = writer.take_writer()?;
         
         // Write command
         pty_writer.write_all(cmd.as_bytes())?;
