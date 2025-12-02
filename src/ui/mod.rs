@@ -60,7 +60,7 @@ impl Widget for &App {
         self.tui_assistant.render(ai_area, buf);
 
         // Render blocks
-        let hint = Line::from(" ^B: Enter Command Mode ");
+        let hint = Line::from(" Ctrl + B: Enter Command Mode ");
         let (block_term, block_ai) = match active {
             _ if self.get_command_mode() => (block_term, block_ai),
             ActivePane::Terminal => (block_term.title_bottom(hint.fg(Color::Black).bg(active_termcolor)), block_ai),

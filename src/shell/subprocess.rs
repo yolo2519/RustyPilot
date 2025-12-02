@@ -4,25 +4,25 @@
 //! to the shell, and reads output for display in the UI.
 
 use anyhow::Result;
-use tokio::sync::mpsc::{self, Sender, Receiver};
+use tokio::sync::mpsc::{self, Sender, Receiver, UnboundedSender};
 
 use crate::event::AppEvent;
 pub struct ShellManager {
-    _event_sink: Sender<AppEvent>,   // Handle for sending message back to App, may be useful
-    _pty_output: Sender<Vec<u8>>,    // Handle for sending bytes from pty reader to terminal
+    _event_sink: UnboundedSender<AppEvent>,   // Handle for sending message back to App, may be useful
+    pty_output: Sender<Vec<u8>>,    // Handle for sending bytes from pty reader to terminal
 
     // NOTE(yushun.tang): I'm not sure if ShellManager should hold these handles,
     // maybe you want to send it to another thread that will be working on reading data from pty reader.
     // totally depends on your implementation.
-    // The _pty_output will be used to send chunks of bytes directly
+    // The pty_output will be used to send chunks of bytes directly
     // to terminal renderer
-    // the _event_sink will be used to inform main App something, but I'm not sure now.
+    // the event_sink will be used to inform main App something, but I'm not sure now.
     // For example, we may want to tell App that "we have read + sent some bytes from pty reader,
     // and likely the terminal is going to be updated" in event-driven design.
 }
 
 impl ShellManager {
-    pub fn new(event_sink: Sender<AppEvent>) -> Result<(Self, Receiver<Vec<u8>>)> {
+    pub fn new(event_sink: UnboundedSender<AppEvent>) -> Result<(Self, Receiver<Vec<u8>>)> {
         // TODO: use portable_pty / tokio::process to implement real shell logic
 
         // TODO: we may need to have a convention on how many bytes
@@ -32,15 +32,40 @@ impl ShellManager {
         Ok((
             Self {
                 _event_sink: event_sink,
-                _pty_output: tx,
+                pty_output: tx,
             },
             rx
         ))
     }
 
-    // TODO：send command to shell
-    pub fn send_command(&mut self, _cmd: &str) -> Result<()> {
-        // TODO: do it later
+    /// Handle user input - for dummy implementation, echo it to pty_output
+    pub fn handle_user_input(&mut self, input: &str) -> Result<()> {
+        // Dummy: Echo user input to pty_output stream
+        // TODO: this is fake
+        let output = input.to_string();
+        let tx = self.pty_output.clone();
+        // in the real implementation the pty_writer's write method will be called so there should
+        // be no futures. If the writer could be async, we will have to refactor our tokio::select
+        tokio::spawn( async move {
+            #[allow(clippy::unwrap_used, reason = "This is a fake implementation")]
+            tx.send(output.into_bytes()).await.unwrap();
+        });
+        Ok(())
+    }
+
+    /// Inject a command into the shell as if the user typed it.
+    /// This will append the command to the PTY input buffer and execute it.
+    pub fn inject_command(&mut self, cmd: &str) -> Result<()> {
+        // Dummy: Echo the command to pty_output stream
+        // TODO: this is fake
+        let tx = self.pty_output.clone();
+        let cmd = cmd.to_string();
+        // in the real implementation the pty_writer's write method will be called so there should
+        // be no futures. If the writer could be async, we will have to refactor our tokio::select
+        tokio::spawn( async move {
+            #[allow(clippy::unwrap_used, reason = "This is a fake implementation")]
+            tx.send(cmd.into_bytes()).await.unwrap();
+        });
         Ok(())
     }
 
