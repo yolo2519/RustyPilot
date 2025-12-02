@@ -52,11 +52,16 @@ pub struct App {
 impl App {
     pub fn new() -> Result<Self> {
         let (event_sink, app_events) = init_app_eventsource();
-        let (shell, pty_rx) = ShellManager::new(event_sink.clone())?;
-
+        
+        // Start with reasonable default size (will be resized on first draw)
+        let cols = 80;
+        let rows = 24;
+        
+        let (shell, pty_rx) = ShellManager::new(event_sink.clone(), cols, rows)?;
+        
         // Create dedicated channel for AI streaming (high-frequency data)
         let (ai_stream_tx, ai_stream_rx) = mpsc::channel::<AiStreamData>(256);
-
+        
         Ok(Self {
             shell_manager: shell,
             ai_sessions: AiSessionManager::new(ai_stream_tx, event_sink.clone()),
@@ -112,13 +117,13 @@ impl App {
                 }
                 res = self.app_events.recv() => {
                     let app_evt = res.with_context(|| anyhow::anyhow!("App event stream is ended"))?;
-                    self.handle_app_event(app_evt).await?;
+                    self.handle_app_event(app_evt)?;
                 }
                 _ = self.tui_assistant.recv_ai_stream() => {
                     // AI stream data is handled internally by TuiAssistant
                 }
                 _ = self.tui_terminal.recv_pty_output() => {
-                    // Terminal output is handled internally by TuiTerminal
+                    // PTY output is handled internally by TuiTerminal
                 }
             }
             self.draw(terminal)?;
@@ -192,9 +197,9 @@ impl App {
 }
 
 impl App {
-    async fn handle_app_event(&mut self, event: AppEvent) -> Result<()> {
+    fn handle_app_event(&mut self, event: AppEvent) -> Result<()> {
         match event {
-            // AI Events (low-frequency, requires App-level handling)
+            // AI Events
             AppEvent::AiCommandSuggestion {
                 session_id,
                 command,
@@ -215,8 +220,18 @@ impl App {
             }
 
             // Shell Events
+            AppEvent::ShellError { message } => {
+                // Display error in terminal pane
+                self.tui_terminal.show_error(&message);
+                
+                // If shell exited, mark app for exit
+                if message.contains("exited") {
+                    self.exit = true;
+                }
+            }
+            
             AppEvent::ShellCommandCompleted { command, exit_code } => {
-                // TODO: Notify UI about command completion
+                // TODO: Update context manager with command history
                 let _ = (command, exit_code); // Suppress unused warnings
             }
         }

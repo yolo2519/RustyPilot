@@ -23,7 +23,7 @@ pub mod terminal;
 
 use std::thread;
 
-use tokio::sync::mpsc::{self, Receiver, UnboundedSender, UnboundedReceiver};
+use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver, UnboundedSender};
 use std::io::Result;
 
 /// Type alias for user input events from the terminal.
@@ -117,7 +117,6 @@ pub enum AppEvent {
     // =========================================================================
 
     /// AI has suggested a command that needs user confirmation.
-    /// This is sent after streaming completes and the response is parsed.
     AiCommandSuggestion {
         session_id: SessionId,
         command: String,
@@ -125,7 +124,6 @@ pub enum AppEvent {
     },
 
     /// User has confirmed execution of the AI-suggested command.
-    /// Backend should retrieve the command from session and inject it into the shell.
     ExecuteAiCommand {
         session_id: SessionId,
     },
@@ -134,6 +132,11 @@ pub enum AppEvent {
     // Shell Events
     // =========================================================================
 
+    /// Shell error occurred (e.g., PTY read error, shell exited)
+    ShellError {
+        message: String,
+    },
+    
     /// Shell command execution completed
     ShellCommandCompleted {
         command: String,
@@ -159,6 +162,8 @@ pub enum AppEvent {
 ///
 /// The sender should be passed to components that need to emit events,
 /// while the receiver is used in the main event loop to handle these events.
+/// 
+/// Unbounded is appropriate here because AppEvent is low-frequency and lightweight.
 pub fn init_app_eventsource() -> (UnboundedSender<AppEvent>, UnboundedReceiver<AppEvent>) {
     mpsc::unbounded_channel()
 }
