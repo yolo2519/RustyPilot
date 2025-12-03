@@ -110,7 +110,7 @@ pub fn handle_key_event(
                     assistant.push_user_message(input.clone());
                     assistant.start_assistant_message();
                     // Send to AI backend - response will come through ai_stream channel
-                    ai_sessions.send_message(session_id, &input);
+                    ai_sessions.send_message(session_id, &input, context);
                 }
             }
         }
