@@ -8,9 +8,11 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 
+use crate::context::ContextSnapshot;
 use crate::event::{AiStreamData, AppEvent};
 
 use super::client::AiCommandSuggestion;
+use super::prompt::build_prompt;
 
 pub type SessionId = u64;
 
@@ -93,27 +95,39 @@ impl AiSessionManager {
     }
 
     /// Send a message to the AI and receive a streaming response.
-    /// TODO
-    /// WARN(cursor): This is a fake implementation for debugging.
+    /// 
+    /// # Arguments
+    /// * `session_id` - The session to send the message in
+    /// * `user_input` - The user's query
+    /// * `context` - Current shell context (cwd, env, history)
+    /// 
+    /// WARN: This is currently a fake implementation for debugging.
     /// It simulates streaming by sending chunks with delays.
     /// Replace with real AI API integration later.
-    pub fn send_message(&mut self, session_id: SessionId, user_input: &str) {
+    pub fn send_message(&mut self, session_id: SessionId, user_input: &str, context: ContextSnapshot) {
         // Store in history
         if let Some(session) = self.sessions.get_mut(&session_id) {
             session.history.push(format!("user: {}", user_input));
         }
 
+        // Build the full prompt with context
+        let full_prompt = build_prompt(user_input, &context);
+
         // Clone what we need for the async task
         let stream_tx = self.ai_stream_tx.clone();
         let event_tx = self.app_event_tx.clone();
         let input = user_input.to_string();
+        let cwd = context.cwd.clone();
 
         // Spawn async task to simulate streaming response
         tokio::spawn(async move {
-            // WARN(cursor): Fake streaming response for debugging
+            // WARN: Fake streaming response for debugging
+            // In real implementation, this would call the AI API with full_prompt
+            let _ = full_prompt; // Suppress unused warning (will be used with real AI)
+            
             let response = format!(
-                "(This is a fake response) You typed \"{}\", so I suggest running a command to help you.",
-                input
+                "I see you're in `{}`. Based on your request \"{}\", I suggest the following command.",
+                cwd, input
             );
 
             // Simulate streaming by sending character by character with delays
@@ -134,12 +148,10 @@ impl AiSessionManager {
             // After a short delay, send a command suggestion
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            // WARN(cursor): Fake command suggestion.
-            let command = "echo 'Hello from AI suggestion!'".to_string();
-            let explanation = "A test command to verify the suggestion feature".to_string();
+            // WARN: Fake command suggestion based on input
+            let (command, explanation) = generate_fake_suggestion(&input, &cwd);
 
             // Send as AppEvent so it creates a proper command card
-            // Note: UnboundedSender::send() is synchronous, no .await needed
             let _ = event_tx
                 .send(AppEvent::AiCommandSuggestion {
                     session_id,
@@ -150,12 +162,38 @@ impl AiSessionManager {
 
         // Store the suggestion in the session (do this synchronously before spawning)
         // Note: In the real implementation, this should be done after parsing the AI response
+        let (cmd, exp) = generate_fake_suggestion(user_input, &context.cwd);
         if let Some(session) = self.sessions.get_mut(&session_id) {
             session.last_suggestion = Some(AiCommandSuggestion {
-                natural_language_explanation: "A test command to verify the suggestion feature".to_string(),
-                suggested_command: "echo 'Hello from AI suggestion!'".to_string(),
+                natural_language_explanation: exp,
+                suggested_command: cmd,
                 alternatives: vec![],
             });
         }
+    }
+}
+
+/// Generate a fake command suggestion based on user input.
+/// This will be replaced with real AI response parsing.
+fn generate_fake_suggestion(input: &str, cwd: &str) -> (String, String) {
+    let input_lower = input.to_lowercase();
+    
+    if input_lower.contains("list") || input_lower.contains("show") || input_lower.contains("ls") {
+        ("ls -la".to_string(), "List all files in the current directory with details".to_string())
+    } else if input_lower.contains("find") || input_lower.contains("search") {
+        ("find . -name '*pattern*' -type f".to_string(), "Search for files matching a pattern".to_string())
+    } else if input_lower.contains("disk") || input_lower.contains("space") || input_lower.contains("size") {
+        ("du -sh *".to_string(), "Show disk usage of files and directories".to_string())
+    } else if input_lower.contains("process") || input_lower.contains("running") {
+        ("ps aux | head -20".to_string(), "Show running processes".to_string())
+    } else if input_lower.contains("git") && input_lower.contains("status") {
+        ("git status".to_string(), "Show the working tree status".to_string())
+    } else if input_lower.contains("network") || input_lower.contains("ip") {
+        ("ifconfig || ip addr".to_string(), "Show network interface information".to_string())
+    } else {
+        (
+            format!("echo 'Working in: {}'", cwd),
+            format!("Echo the current working directory (you asked: {})", input),
+        )
     }
 }

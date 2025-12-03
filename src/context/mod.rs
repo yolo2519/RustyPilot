@@ -12,10 +12,18 @@ pub use cwd::CurrentDir;
 pub use env::Environment;
 pub use history::History;
 
+/// Manages all context information for AI suggestions.
+#[derive(Debug)]
 pub struct ContextManager {
     pub env: Environment,
     pub cwd: CurrentDir,
     pub history: History,
+}
+
+impl Default for ContextManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ContextManager {
@@ -27,18 +35,68 @@ impl ContextManager {
         }
     }
 
+    /// Create a snapshot of the current context for AI consumption.
     pub fn snapshot(&self) -> ContextSnapshot {
         ContextSnapshot {
             cwd: self.cwd.path.clone(),
-            env_vars: self.env.vars.clone(),
+            env_vars: self.env.filtered_vars(),
             recent_history: self.history.recent(20),
         }
     }
+
+    /// Update the current working directory.
+    pub fn update_cwd(&mut self, new_path: String) {
+        self.cwd.update(new_path);
+    }
+
+    /// Update CWD from an OSC 7 sequence.
+    pub fn update_cwd_from_osc7(&mut self, osc_payload: &str) -> bool {
+        self.cwd.update_from_osc7(osc_payload)
+    }
+
+    /// Add a command to history.
+    pub fn add_to_history(&mut self, command: String) {
+        self.history.push(command);
+    }
+
+    /// Refresh environment variables from the current process.
+    pub fn refresh_env(&mut self) {
+        self.env = Environment::capture();
+    }
 }
 
+/// A snapshot of context information for AI prompt building.
 #[derive(Clone, Debug)]
 pub struct ContextSnapshot {
     pub cwd: String,
     pub env_vars: Vec<(String, String)>,
     pub recent_history: Vec<String>,
+}
+
+impl ContextSnapshot {
+    /// Format context as a string for AI prompts.
+    pub fn format_for_prompt(&self) -> String {
+        let mut result = String::new();
+        
+        // Current directory
+        result.push_str(&format!("Current directory: {}\n", self.cwd));
+        
+        // Recent history (if any)
+        if !self.recent_history.is_empty() {
+            result.push_str("\nRecent commands:\n");
+            for (i, cmd) in self.recent_history.iter().rev().take(5).enumerate() {
+                result.push_str(&format!("  {}. {}\n", i + 1, cmd));
+            }
+        }
+        
+        // Key environment variables
+        if !self.env_vars.is_empty() {
+            result.push_str("\nRelevant environment:\n");
+            for (key, value) in &self.env_vars {
+                result.push_str(&format!("  {}={}\n", key, value));
+            }
+        }
+        
+        result
+    }
 }
