@@ -55,16 +55,16 @@ pub struct App {
 impl App {
     pub fn new() -> Result<Self> {
         let (event_sink, app_events) = init_app_eventsource();
-        
+
         // Start with reasonable default size (will be resized on first draw)
         let cols = 80;
         let rows = 24;
-        
+
         let (shell, pty_rx) = ShellManager::new(event_sink.clone(), cols, rows)?;
-        
+
         // Create dedicated channel for AI streaming (high-frequency data)
         let (ai_stream_tx, ai_stream_rx) = mpsc::channel::<AiStreamData>(256);
-        
+
         Ok(Self {
             shell_manager: shell,
             ai_sessions: AiSessionManager::new(ai_stream_tx, event_sink.clone()),
@@ -137,13 +137,13 @@ impl App {
     pub fn draw(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         // Store cursor info and terminal area for later use
         let mut cursor_info: Option<(u16, u16, u16, u16)> = None; // (x, y, cols, rows)
-        
+
         terminal.draw(|frame| {
             let area = frame.area();
-            
+
             // Render the app
             let (term_area, should_show_cursor) = self.render_with_info(area, frame.buffer_mut());
-            
+
             // Store cursor position relative to terminal area if Terminal pane is active
             if should_show_cursor {
                 let (cursor_row, cursor_col) = self.tui_terminal.cursor_position();
@@ -155,13 +155,13 @@ impl App {
                 ));
             }
         })?;
-        
+
         // Handle terminal resize outside of draw closure
         if let Some((_, _, cols, rows)) = cursor_info {
             let needs_resize = self.last_terminal_size
                 .map(|(last_cols, last_rows)| last_cols != cols || last_rows != rows)
                 .unwrap_or(true);
-            
+
             if needs_resize {
                 self.tui_terminal.resize(cols, rows);
                 if let Err(e) = self.shell_manager.resize(cols, rows) {
@@ -170,7 +170,7 @@ impl App {
                 self.last_terminal_size = Some((cols, rows));
             }
         }
-        
+
         // Set cursor position and visibility after draw
         if let Some((x, y, _, _)) = cursor_info {
             terminal.show_cursor()?;
@@ -178,7 +178,7 @@ impl App {
         } else {
             terminal.hide_cursor()?;
         }
-        
+
         Ok(())
     }
 }
@@ -243,6 +243,9 @@ impl App {
 impl App {
     fn handle_app_event(&mut self, event: AppEvent) -> Result<()> {
         match event {
+            AppEvent::PtyWrite(s) => {
+                self.shell_manager.handle_user_input(&s)?;
+            }
             // AI Events
             AppEvent::AiCommandSuggestion {
                 session_id,
@@ -267,13 +270,13 @@ impl App {
             AppEvent::ShellError { message } => {
                 // Display error in terminal pane
                 self.tui_terminal.show_error(&message);
-                
+
                 // If shell exited, mark app for exit
                 if message.contains("exited") {
                     self.exit = true;
                 }
             }
-            
+
             AppEvent::ShellCommandCompleted { command, exit_code } => {
                 // TODO: Update context manager with command history
                 let _ = (command, exit_code); // Suppress unused warnings
