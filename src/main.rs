@@ -20,7 +20,7 @@ use crate::utils::context::Context;
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
-    let _ctx = Context::with(|| ratatui::restore());
+    let _ctx = Context::with(ratatui::restore);
     let mut app = App::new()?;
     // draw 1st frame
     app.draw(&mut terminal)?;
