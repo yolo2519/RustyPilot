@@ -62,6 +62,13 @@ pub fn handle_key_event(
         KeyCode::Home => {
             assistant.move_cursor_to_start();
         }
+        
+        // Scroll to bottom with Shift+End or Ctrl+End (must come before plain End)
+        KeyCode::End if key_evt.modifiers.contains(KeyModifiers::SHIFT) 
+                     || key_evt.modifiers.contains(KeyModifiers::CONTROL) => {
+            assistant.scroll_to_bottom();
+        }
+        
         KeyCode::End => {
             assistant.move_cursor_to_end();
         }
