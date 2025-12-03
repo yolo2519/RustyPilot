@@ -6,7 +6,7 @@
 mod allowlist;
 mod analyzer;
 
-pub use allowlist::Allowlist;
+pub use allowlist::{Allowlist, Verdict, evaluate};
 pub use analyzer::analyze_command;
 
 #[derive(Debug)]
