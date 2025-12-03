@@ -198,8 +198,10 @@ impl TuiTerminal {
 
         // Iterate through visible lines, considering scroll offset
         for line_idx in 0..screen_lines {
+            // When scrolled up, we want to show lines from history
+            // line_idx 0 at scroll_offset N should show line -N
             let actual_line_idx = if self.scroll_offset > 0 {
-                -((self.scroll_offset - line_idx) as i32)
+                line_idx as i32 - self.scroll_offset as i32
             } else {
                 line_idx as i32
             };

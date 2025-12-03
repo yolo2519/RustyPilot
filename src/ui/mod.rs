@@ -40,9 +40,14 @@ impl App {
         let active_aicolor = if self.get_command_mode() { cmdmode_color } else { Color::Cyan };
         let inactive_color = if self.get_command_mode() { cmdmode_color } else { Color::DarkGray };
 
-        // Render terminal pane border
+        // Render terminal pane border with scroll indicator
+        let term_title = if self.tui_terminal.is_scrolled() {
+            format!("RustyTerm [Scrolled ↑{}]", self.tui_terminal.scroll_offset())
+        } else {
+            "RustyTerm".to_string()
+        };
         let block_term = Block::default()
-            .title("RustyTerm")
+            .title(term_title)
             .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT)
             .border_style(Style::default().fg(if matches!(active, ActivePane::Terminal) { active_termcolor } else { inactive_color }));
         let term_area = block_term.inner(chunks[0]);
@@ -58,8 +63,13 @@ impl App {
         // Render separator
         render_separator(chunks[1], buf, side, line::Set::default());
 
+        let ai_title = if self.tui_assistant.is_scrolled() {
+            format!("Assistant [Scrolled ↑{}]", self.tui_assistant.scroll_offset())
+        } else {
+            "Assistant".to_string()
+        };
         let block_ai = Block::default()
-            .title("Assistant")
+            .title(ai_title)
             .borders(Borders::TOP | Borders::BOTTOM | Borders::RIGHT)
             .border_style(Style::default().fg(if matches!(active, ActivePane::Assistant) { active_aicolor } else { inactive_color }));
         let ai_area = block_ai.inner(chunks[2]);

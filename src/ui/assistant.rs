@@ -385,6 +385,11 @@ impl TuiAssistant {
     pub fn scroll_offset(&self) -> u16 {
         self.scroll_offset
     }
+    
+    /// Check if we're scrolled back (not at bottom)
+    pub fn is_scrolled(&self) -> bool {
+        self.scroll_offset != u16::MAX && self.scroll_offset > 0
+    }
 }
 
 
