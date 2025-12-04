@@ -64,7 +64,7 @@ impl App {
         
         Ok(Self {
             shell_manager: shell,
-            ai_sessions: AiSessionManager::new(ai_stream_tx, event_sink.clone()),
+            ai_sessions: AiSessionManager::new(ai_stream_tx, event_sink.clone(), "gpt-4o-mini"),
             tui_terminal: TuiTerminal::new(pty_rx, event_sink.clone()),
             tui_assistant: TuiAssistant::new(ai_stream_rx),
             active_pane: ActivePane::Terminal,

@@ -4,48 +4,107 @@
 //! separate conversation contexts and retrieve previous suggestions and interactions.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
+use async_openai::types::{
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+    CreateChatCompletionRequestArgs,
+};
+use async_openai::Client;
+use futures::StreamExt;
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 
+use crate::context::ContextSnapshot;
 use crate::event::{AiStreamData, AppEvent};
 
 use super::client::AiCommandSuggestion;
+use super::parser;
+use super::prompt;
 
 pub type SessionId = u64;
 
+/// Represents a single AI chat session with conversation history
 pub struct AiSession {
     pub id: SessionId,
-    pub history: Vec<String>, // store text (easy version?)
+    /// Full conversation history for OpenAI API (includes system, user, assistant messages)
+    pub conversation_history: Vec<ChatCompletionRequestMessage>,
+    /// Last command suggestion received from AI
     pub last_suggestion: Option<AiCommandSuggestion>,
+    /// Accumulated response text from current streaming request
+    pub current_response: String,
 }
 
+impl AiSession {
+    fn new(id: SessionId, system_prompt: String) -> Self {
+        let system_msg = ChatCompletionRequestSystemMessageArgs::default()
+            .content(system_prompt)
+            .build()
+            .expect("Failed to build system message")
+            .into();
+
+        Self {
+            id,
+            conversation_history: vec![system_msg],
+            last_suggestion: None,
+            current_response: String::new(),
+        }
+    }
+}
+
+/// Manages multiple AI sessions and handles communication with OpenAI
 pub struct AiSessionManager {
     sessions: HashMap<SessionId, AiSession>,
     current_id: SessionId,
     next_id: SessionId,
     ai_stream_tx: Sender<AiStreamData>,
     app_event_tx: UnboundedSender<AppEvent>,
+    client: Client<async_openai::config::OpenAIConfig>,
+    model: String,
 }
 
 impl AiSessionManager {
-    pub fn new(ai_stream_tx: Sender<AiStreamData>, app_event_tx: UnboundedSender<AppEvent>) -> Self {
+    pub fn new(
+        ai_stream_tx: Sender<AiStreamData>,
+        app_event_tx: UnboundedSender<AppEvent>,
+        model: impl Into<String>,
+    ) -> Self {
+        let system_prompt = Self::default_system_prompt();
         let mut manager = Self {
             sessions: HashMap::new(),
             current_id: 1,
             next_id: 2,
             ai_stream_tx,
             app_event_tx,
+            client: Client::new(),
+            model: model.into(),
         };
-        manager.sessions.insert(
-            1,
-            AiSession {
-                id: 1,
-                history: Vec::new(),
-                last_suggestion: None,
-            },
-        );
+        manager.sessions.insert(1, AiSession::new(1, system_prompt));
         manager
+    }
+
+    /// Default system prompt for shell command assistance
+    fn default_system_prompt() -> String {
+        r#"You are an expert shell command assistant. Your role is to help users by:
+
+1. Understanding their natural language requests
+2. Suggesting safe, correct shell commands
+3. Explaining what the commands do
+4. Providing alternatives when appropriate
+
+When suggesting commands:
+- Always explain what the command does
+- Warn about potentially dangerous operations
+- Consider the user's current directory and environment
+- Prefer standard POSIX commands when possible
+- Format your response clearly
+
+If you suggest a command, format it like this:
+COMMAND: <the actual command>
+EXPLANATION: <what it does and why>
+ALTERNATIVES: <optional alternative commands, one per line>
+
+Be concise but thorough. Safety first."#
+            .to_string()
     }
 
     pub fn current_session(&self) -> Option<&AiSession> {
@@ -60,6 +119,15 @@ impl AiSessionManager {
         self.current_id
     }
 
+    pub fn switch_session(&mut self, session_id: SessionId) -> bool {
+        if self.sessions.contains_key(&session_id) {
+            self.current_id = session_id;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Get the last command suggestion for a session, if any
     pub fn get_last_suggestion(&self, session_id: SessionId) -> Option<&AiCommandSuggestion> {
         self.sessions
@@ -70,9 +138,9 @@ impl AiSessionManager {
     /// Execute the suggested command for a session.
     /// This sends an ExecuteAiCommand event to the app layer.
     pub fn execute_suggestion(&self, session_id: SessionId) -> anyhow::Result<()> {
-        // Verify that there's a suggestion to execute
         if self.get_last_suggestion(session_id).is_some() {
-            self.app_event_tx.send(AppEvent::ExecuteAiCommand { session_id })?;
+            self.app_event_tx
+                .send(AppEvent::ExecuteAiCommand { session_id })?;
         }
         Ok(())
     }
@@ -80,82 +148,173 @@ impl AiSessionManager {
     pub fn new_session(&mut self) -> SessionId {
         let id = self.next_id;
         self.next_id += 1;
-        self.sessions.insert(
-            id,
-            AiSession {
-                id,
-                history: Vec::new(),
-                last_suggestion: None,
-            },
-        );
+        let system_prompt = Self::default_system_prompt();
+        self.sessions.insert(id, AiSession::new(id, system_prompt));
         self.current_id = id;
         id
     }
 
-    /// Send a message to the AI and receive a streaming response.
-    /// TODO
-    /// WARN(cursor): This is a fake implementation for debugging.
-    /// It simulates streaming by sending chunks with delays.
-    /// Replace with real AI API integration later.
-    pub fn send_message(&mut self, session_id: SessionId, user_input: &str) {
-        // Store in history
-        if let Some(session) = self.sessions.get_mut(&session_id) {
-            session.history.push(format!("user: {}", user_input));
-        }
+    /// Send a message to the AI with system context and receive a streaming response.
+    ///
+    /// This method:
+    /// 1. Builds a prompt with user query + system context (cwd, env, history)
+    /// 2. Sends the request to OpenAI with streaming enabled
+    /// 3. Streams chunks back through the ai_stream_tx channel
+    /// 4. Parses the final response for command suggestions
+    /// 5. Sends command suggestion events through app_event_tx
+    pub fn send_message(
+        &mut self,
+        session_id: SessionId,
+        user_input: &str,
+        context: ContextSnapshot,
+    ) {
+        // Get session and add user message to history
+        let session = match self.sessions.get_mut(&session_id) {
+            Some(s) => s,
+            None => {
+                let _ = self.ai_stream_tx.try_send(AiStreamData::Error {
+                    session_id,
+                    error: "Session not found".to_string(),
+                });
+                return;
+            }
+        };
+
+        // Build prompt with context
+        let prompt = prompt::build_prompt(user_input, &context);
+
+        // Create user message
+        let user_msg = match ChatCompletionRequestUserMessageArgs::default()
+            .content(prompt)
+            .build()
+        {
+            Ok(msg) => msg.into(),
+            Err(e) => {
+                let _ = self.ai_stream_tx.try_send(AiStreamData::Error {
+                    session_id,
+                    error: format!("Failed to build message: {}", e),
+                });
+                return;
+            }
+        };
+
+        session.conversation_history.push(user_msg);
+        session.current_response.clear();
+
+        // Build OpenAI request
+        let request = match CreateChatCompletionRequestArgs::default()
+            .model(&self.model)
+            .messages(session.conversation_history.clone())
+            .build()
+        {
+            Ok(req) => req,
+            Err(e) => {
+                let _ = self.ai_stream_tx.try_send(AiStreamData::Error {
+                    session_id,
+                    error: format!("Failed to build request: {}", e),
+                });
+                return;
+            }
+        };
 
         // Clone what we need for the async task
         let stream_tx = self.ai_stream_tx.clone();
         let event_tx = self.app_event_tx.clone();
-        let input = user_input.to_string();
+        let client = self.client.clone();
 
-        // Spawn async task to simulate streaming response
+        // Spawn async task to handle streaming
         tokio::spawn(async move {
-            // WARN(cursor): Fake streaming response for debugging
-            let response = format!(
-                "(This is a fake response) You typed \"{}\", so I suggest running a command to help you.",
-                input
-            );
+            let mut full_response = String::new();
 
-            // Simulate streaming by sending character by character with delays
-            for chunk in response.chars().collect::<Vec<_>>().chunks(3) {
-                let text: String = chunk.iter().collect();
-                let _ = stream_tx
-                    .send(AiStreamData::Chunk {
-                        session_id,
-                        text,
-                    })
-                    .await;
-                tokio::time::sleep(Duration::from_millis(30)).await;
+            match client.chat().create_stream(request).await {
+                Ok(mut stream) => {
+                    // Process streaming chunks
+                    while let Some(result) = stream.next().await {
+                        match result {
+                            Ok(response) => {
+                                for choice in response.choices {
+                                    if let Some(content) = choice.delta.content {
+                                        full_response.push_str(&content);
+                                        // Send chunk to UI
+                                        let _ = stream_tx
+                                            .send(AiStreamData::Chunk {
+                                                session_id,
+                                                text: content,
+                                            })
+                                            .await;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ = stream_tx
+                                    .send(AiStreamData::Error {
+                                        session_id,
+                                        error: format!("Stream error: {}", e),
+                                    })
+                                    .await;
+                                return;
+                            }
+                        }
+                    }
+
+                    // Stream completed successfully
+                    let _ = stream_tx.send(AiStreamData::End { session_id }).await;
+
+                    // Parse the response for command suggestions
+                    if let Some(suggestion) = parser::parse_command_suggestion(&full_response) {
+                        // Send command suggestion event
+                        let _ = event_tx.send(AppEvent::AiCommandSuggestion {
+                            session_id,
+                            command: suggestion.suggested_command.clone(),
+                            explanation: suggestion.natural_language_explanation.clone(),
+                        });
+                    }
+                }
+                Err(e) => {
+                    let _ = stream_tx
+                        .send(AiStreamData::Error {
+                            session_id,
+                            error: format!("API error: {}", e),
+                        })
+                        .await;
+                }
+            }
+        });
+    }
+
+    /// Update session with the completed AI response
+    /// Call this when receiving AiStreamData::End
+    pub fn finalize_response(&mut self, session_id: SessionId, response: String) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            // Add assistant message to conversation history
+            if let Ok(assistant_msg) = ChatCompletionRequestAssistantMessageArgs::default()
+                .content(response.clone())
+                .build()
+            {
+                session.conversation_history.push(assistant_msg.into());
             }
 
-            // End the stream
-            let _ = stream_tx.send(AiStreamData::End { session_id }).await;
+            // Parse and store command suggestion
+            if let Some(suggestion) = parser::parse_command_suggestion(&response) {
+                session.last_suggestion = Some(suggestion);
+            }
 
-            // After a short delay, send a command suggestion
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            // WARN(cursor): Fake command suggestion.
-            let command = "echo 'Hello from AI suggestion!'".to_string();
-            let explanation = "A test command to verify the suggestion feature".to_string();
-
-            // Send as AppEvent so it creates a proper command card
-            // Note: UnboundedSender::send() is synchronous, no .await needed
-            let _ = event_tx
-                .send(AppEvent::AiCommandSuggestion {
-                    session_id,
-                    command: command.clone(),
-                    explanation: explanation.clone(),
-                });
-        });
-
-        // Store the suggestion in the session (do this synchronously before spawning)
-        // Note: In the real implementation, this should be done after parsing the AI response
-        if let Some(session) = self.sessions.get_mut(&session_id) {
-            session.last_suggestion = Some(AiCommandSuggestion {
-                natural_language_explanation: "A test command to verify the suggestion feature".to_string(),
-                suggested_command: "echo 'Hello from AI suggestion!'".to_string(),
-                alternatives: vec![],
-            });
+            // Clear current response buffer
+            session.current_response.clear();
         }
+    }
+
+    /// Append a chunk to the current response being streamed
+    pub fn append_chunk(&mut self, session_id: SessionId, chunk: &str) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.current_response.push_str(chunk);
+        }
+    }
+
+    /// Get the current accumulated response for a session
+    pub fn get_current_response(&self, session_id: SessionId) -> Option<&str> {
+        self.sessions
+            .get(&session_id)
+            .map(|s| s.current_response.as_str())
     }
 }
