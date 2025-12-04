@@ -350,6 +350,9 @@ impl App {
 impl App {
     fn handle_app_event(&mut self, event: AppEvent) -> Result<()> {
         match event {
+            AppEvent::PtyWrite(s) => {
+                self.shell_manager.handle_user_input(&s)?;
+            }
             // AI Events
             AppEvent::AiCommandSuggestion {
                 session_id,
