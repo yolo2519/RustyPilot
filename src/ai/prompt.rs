@@ -46,9 +46,10 @@ pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> String {
         let relevant_vars = ["PATH", "HOME", "USER", "SHELL", "EDITOR", "LANG"];
         for (key, value) in &ctx.env_vars {
             if relevant_vars.contains(&key.as_str()) {
-                // Truncate long values (like PATH)
-                let display_value = if value.len() > 100 {
-                    format!("{}...", &value[..100])
+                // Truncate long values (like PATH) safely on char boundaries
+                let display_value = if value.chars().count() > 100 {
+                    let truncated: String = value.chars().take(100).collect();
+                    format!("{}...", truncated)
                 } else {
                     value.clone()
                 };
