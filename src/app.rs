@@ -119,7 +119,7 @@ impl App {
                     let app_evt = res.with_context(|| anyhow::anyhow!("App event stream is ended"))?;
                     self.handle_app_event(app_evt)?;
                 }
-                _ = self.tui_assistant.recv_ai_stream() => {
+                _ = self.tui_assistant.recv_ai_stream(&mut self.ai_sessions) => {
                     // AI stream data is handled internally by TuiAssistant
                 }
                 _ = self.tui_terminal.recv_pty_output() => {
@@ -164,6 +164,7 @@ impl App {
                         assistant_event::handle_key_event(
                             &mut self.tui_assistant,
                             &mut self.ai_sessions,
+                            &self.context_manager,
                             key_evt,
                         )?;
                     }
@@ -231,8 +232,8 @@ impl App {
             }
             
             AppEvent::ShellCommandCompleted { command, exit_code } => {
-                // TODO: Update context manager with command history
-                let _ = (command, exit_code); // Suppress unused warnings
+                self.context_manager.history.push(command);
+                let _ = exit_code; // Suppress unused warnings for now
             }
         }
         Ok(())

@@ -13,6 +13,7 @@ use crate::ui::assistant::TuiAssistant;
 pub fn handle_key_event(
     assistant: &mut TuiAssistant,
     ai_sessions: &mut AiSessionManager,
+    context_manager: &crate::context::ContextManager,
     key_evt: KeyEvent,
 ) -> Result<()> {
     // Check for pending command confirmation first (Y/N shortcuts)
@@ -88,15 +89,7 @@ pub fn handle_key_event(
                 assistant.push_user_message(input.clone());
                 assistant.start_assistant_message();
                 // Send to AI backend - response will come through ai_stream channel
-                // TODO: Get actual context from context_manager
-                let context = crate::context::ContextSnapshot {
-                    cwd: std::env::current_dir()
-                        .ok()
-                        .and_then(|p| p.to_str().map(String::from))
-                        .unwrap_or_else(|| "/".to_string()),
-                    env_vars: vec![],
-                    recent_history: vec![],
-                };
+                let context = context_manager.snapshot();
                 ai_sessions.send_message(session_id, &input, context);
             }
         }

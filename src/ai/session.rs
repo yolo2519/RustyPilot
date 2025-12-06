@@ -23,6 +23,8 @@ use super::prompt;
 
 pub type SessionId = u64;
 
+const MAX_HISTORY_MESSAGES: usize = 50;
+
 /// Represents a single AI chat session with conversation history
 pub struct AiSession {
     pub id: SessionId,
@@ -200,6 +202,7 @@ Be concise but thorough. Safety first."#
 
         session.conversation_history.push(user_msg);
         session.current_response.clear();
+        Self::trim_history(session);
 
         // Build OpenAI request
         let request = match CreateChatCompletionRequestArgs::default()
@@ -224,8 +227,6 @@ Be concise but thorough. Safety first."#
 
         // Spawn async task to handle streaming
         tokio::spawn(async move {
-            let mut full_response = String::new();
-
             match client.chat().create_stream(request).await {
                 Ok(mut stream) => {
                     // Process streaming chunks
@@ -234,7 +235,6 @@ Be concise but thorough. Safety first."#
                             Ok(response) => {
                                 for choice in response.choices {
                                     if let Some(content) = choice.delta.content {
-                                        full_response.push_str(&content);
                                         // Send chunk to UI
                                         let _ = stream_tx
                                             .send(AiStreamData::Chunk {
@@ -259,16 +259,6 @@ Be concise but thorough. Safety first."#
 
                     // Stream completed successfully
                     let _ = stream_tx.send(AiStreamData::End { session_id }).await;
-
-                    // Parse the response for command suggestions
-                    if let Some(suggestion) = parser::parse_command_suggestion(&full_response) {
-                        // Send command suggestion event
-                        let _ = event_tx.send(AppEvent::AiCommandSuggestion {
-                            session_id,
-                            command: suggestion.suggested_command.clone(),
-                            explanation: suggestion.natural_language_explanation.clone(),
-                        });
-                    }
                 }
                 Err(e) => {
                     let _ = stream_tx
@@ -296,11 +286,18 @@ Be concise but thorough. Safety first."#
 
             // Parse and store command suggestion
             if let Some(suggestion) = parser::parse_command_suggestion(&response) {
-                session.last_suggestion = Some(suggestion);
+                session.last_suggestion = Some(suggestion.clone());
+                // Emit suggestion event so UI can render a card
+                let _ = self.app_event_tx.send(AppEvent::AiCommandSuggestion {
+                    session_id,
+                    command: suggestion.suggested_command,
+                    explanation: suggestion.natural_language_explanation,
+                });
             }
 
             // Clear current response buffer
             session.current_response.clear();
+            Self::trim_history(session);
         }
     }
 
@@ -316,5 +313,31 @@ Be concise but thorough. Safety first."#
         self.sessions
             .get(&session_id)
             .map(|s| s.current_response.as_str())
+    }
+
+    fn trim_history(session: &mut AiSession) {
+        if session.conversation_history.len() <= MAX_HISTORY_MESSAGES {
+            return;
+        }
+
+        // Always keep the initial system prompt
+        let mut new_history = Vec::with_capacity(MAX_HISTORY_MESSAGES);
+        if let Some(first) = session.conversation_history.first() {
+            new_history.push(first.clone());
+        }
+
+        let to_keep = session
+            .conversation_history
+            .iter()
+            .rev()
+            .take(MAX_HISTORY_MESSAGES.saturating_sub(1))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for msg in to_keep.into_iter().rev() {
+            new_history.push(msg);
+        }
+
+        session.conversation_history = new_history;
     }
 }
