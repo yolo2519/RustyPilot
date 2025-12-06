@@ -142,6 +142,11 @@ pub enum AppEvent {
         command: String,
         exit_code: i32,
     },
+
+    /// Shell produced output chunk (throttled to short snippets)
+    ShellOutput {
+        data: String,
+    },
 }
 
 /// Initializes the application event system.

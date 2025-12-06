@@ -29,6 +29,15 @@ pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> String {
         prompt.push_str("\n");
     }
 
+    // Recent terminal output
+    if !ctx.recent_output.is_empty() {
+        prompt.push_str("RECENT TERMINAL OUTPUT (last few lines):\n");
+        for line in ctx.recent_output.iter().rev().take(6).rev() {
+            prompt.push_str(&format!("  {}\n", line));
+        }
+        prompt.push_str("\n");
+    }
+
     // Relevant environment variables
     if !ctx.env_vars.is_empty() {
         prompt.push_str("RELEVANT ENVIRONMENT:\n");
@@ -72,6 +81,7 @@ mod tests {
                 ("SHELL".to_string(), "/bin/bash".to_string()),
             ],
             recent_history: vec!["ls -la".to_string(), "cd projects".to_string()],
+            recent_output: vec!["output line".to_string()],
         };
 
         let prompt = build_prompt("list all files", &ctx);
@@ -90,6 +100,7 @@ mod tests {
             cwd: "/".to_string(),
             env_vars: vec![],
             recent_history: vec![],
+            recent_output: vec![],
         };
 
         let prompt = build_prompt("help me", &ctx);

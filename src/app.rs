@@ -235,6 +235,10 @@ impl App {
                 self.context_manager.history.push(command);
                 let _ = exit_code; // Suppress unused warnings for now
             }
+
+            AppEvent::ShellOutput { data } => {
+                self.context_manager.push_output(data);
+            }
         }
         Ok(())
     }
