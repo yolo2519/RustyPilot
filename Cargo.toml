@@ -3,10 +3,6 @@ name = "rusty-term"
 version = "0.1.0"
 edition = "2024"
 
-[lib]
-name = "rusty_term"
-path = "src/lib.rs"
-
 [dependencies]
 anyhow = "1.0"
 async-openai = "0.30.1"
