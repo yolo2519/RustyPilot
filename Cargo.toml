@@ -17,3 +17,17 @@ futures = "0"
 unicode-width = "0"
 alacritty_terminal = "0.25.1"
 textwrap = "0.16"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+chrono = "0.4"
+
+[lints.clippy]
+# Prevent silent failures - these are ERRORS, not warnings
+let_underscore_must_use = "deny"     # Error on: let _ = Result/must_use
+unused_io_amount = "deny"            # Error on: ignoring read/write bytes
+unwrap_used = "deny"                 # Error on: .unwrap()
+expect_used = "deny"                 # Error on: .expect()
+
+[lints.rust]
+unused_must_use = "deny"             # Error on: ignoring #[must_use] values

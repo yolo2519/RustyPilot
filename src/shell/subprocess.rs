@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use anyhow::Result;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::mpsc::{self, Receiver, UnboundedSender};
+use tracing::error;
 
 use crate::event::AppEvent;
 
@@ -61,7 +62,7 @@ impl ShellManager {
 
         let mut cmd = CommandBuilder::new(&shell_cmd);
         cmd.env("TERM", "xterm-256color");
-        
+
         // Inherit current working directory
         if let Ok(cwd) = std::env::current_dir() {
             cmd.cwd(cwd);
@@ -71,7 +72,7 @@ impl ShellManager {
 
         // Drop slave side in parent process
         drop(pair.slave);
-        
+
         // Note: We don't need to keep _child alive because the PTY will remain open
         // as long as pty_master exists. The child process will exit when the PTY closes.
 
@@ -95,9 +96,11 @@ impl ShellManager {
                 match reader.read(&mut buf) {
                     Ok(0) => {
                         // EOF: shell exited
-                        let _ = event_sink_clone.send(AppEvent::ShellError {
+                        if let Err(e) = event_sink_clone.send(AppEvent::ShellError {
                             message: "Shell process exited".to_string(),
-                        });
+                        }) {
+                            error!("Failed to send ShellError event (shell exited): {:?}", e);
+                        }
                         break;
                     }
                     Ok(n) => {
@@ -111,9 +114,11 @@ impl ShellManager {
                     Err(e) => {
                         // IO error
                         if e.kind() != std::io::ErrorKind::Interrupted {
-                            let _ = event_sink_clone.send(AppEvent::ShellError {
+                            if let Err(send_err) = event_sink_clone.send(AppEvent::ShellError {
                                 message: format!("PTY read error: {}", e),
-                            });
+                            }) {
+                                error!("Failed to send ShellError event (PTY read error): {:?}", send_err);
+                            }
                             break;
                         }
                         // Interrupted errors are non-fatal, continue
@@ -140,7 +145,7 @@ impl ShellManager {
         let mut pty_writer = self.pty_writer.lock().map_err(|e| {
             anyhow::anyhow!("Failed to lock PTY writer: {}", e)
         })?;
-        
+
         pty_writer.write_all(data)?;
         pty_writer.flush()?;
         Ok(())
@@ -154,13 +159,13 @@ impl ShellManager {
         let mut pty_writer = self.pty_writer.lock().map_err(|e| {
             anyhow::anyhow!("Failed to lock PTY writer: {}", e)
         })?;
-        
+
         // Write command
         pty_writer.write_all(cmd.as_bytes())?;
         // Add newline to execute
         pty_writer.write_all(b"\n")?;
         pty_writer.flush()?;
-        
+
         Ok(())
     }
 
@@ -173,14 +178,14 @@ impl ShellManager {
         let pty = self.pty_master.lock().map_err(|e| {
             anyhow::anyhow!("Failed to lock PTY master: {}", e)
         })?;
-        
+
         pty.resize(PtySize {
             rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
         })?;
-        
+
         Ok(())
     }
 }

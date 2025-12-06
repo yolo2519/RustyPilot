@@ -14,6 +14,7 @@ use async_openai::types::{
 use async_openai::Client;
 use futures::StreamExt;
 use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tracing::error;
 
 use crate::context::ContextSnapshot;
 use crate::event::{AiStreamData, AppEvent};

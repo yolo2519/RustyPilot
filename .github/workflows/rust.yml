@@ -29,9 +29,9 @@ jobs:
 
     - name: Build
       run: cargo build --workspace --all-targets --verbose
-    
-    - name: Clippy (deny unwrap/expect)
-      run: cargo clippy --workspace -- -D clippy::unwrap_used -D clippy::expect_used
+
+    - name: Clippy (deny unwrap/expect/must_use/nodiscard)
+      run: cargo clippy --workspace -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::let_underscore_must_use -D clippy::unused_io_amount -D unused_must_use
 
     - name: Run tests
       run: cargo test --workspace --all-targets --verbose
