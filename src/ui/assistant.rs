@@ -11,7 +11,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::Buffer;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use tokio::sync::mpsc::Receiver;
 
 use crate::ai::session::SessionId;
@@ -24,7 +24,7 @@ use crate::event::AiStreamData;
 /// Status of a command suggestion card
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandStatus {
-    /// Waiting for user confirmation (Y/N)
+    /// Waiting for user confirmation (Ctrl+Y/Ctrl+N)
     Pending,
     /// User confirmed and command was sent to shell
     Executed,
@@ -222,11 +222,9 @@ impl TuiAssistant {
 
     /// Append a chunk to the current streaming message
     pub fn append_stream_chunk(&mut self, chunk: &str) {
-        if let Some(ChatMessage::Assistant { text, is_streaming }) = self.messages.last_mut() {
-            if *is_streaming {
-                text.push_str(chunk);
-                self.scroll_to_bottom();
-            }
+        if let Some(ChatMessage::Assistant { text, is_streaming }) = self.messages.last_mut() && *is_streaming {
+            text.push_str(chunk);
+            self.scroll_to_bottom();
         }
     }
 
@@ -395,6 +393,99 @@ impl TuiAssistant {
     pub fn scroll_offset(&self) -> u16 {
         self.scroll_offset
     }
+
+    /// Check if we're scrolled back (not at bottom)
+    pub fn is_scrolled(&self) -> bool {
+        self.scroll_offset != u16::MAX && self.scroll_offset > 0
+    }
+
+    /// Calculate the number of lines needed to display the input text.
+    /// Returns the number of lines (minimum 1).
+    pub fn calculate_input_lines(&self, width: u16) -> u16 {
+        if width == 0 {
+            return 1;
+        }
+
+        let prompt = "> ";
+        let prompt_width = prompt.len() as u16;
+
+        if self.input_buffer.is_empty() {
+            return 1;
+        }
+
+        let mut lines = 1u16;
+        let mut current_x = prompt_width;
+
+        for ch in self.input_buffer.chars() {
+            if ch == '\n' {
+                // Manual newline: start a new line
+                lines += 1;
+                current_x = 0;
+                continue;
+            }
+
+            let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+
+            if current_x + char_width > width {
+                // Wrap to next line
+                lines += 1;
+                current_x = char_width;
+            } else {
+                current_x += char_width;
+            }
+        }
+
+        lines
+    }
+
+    /// Calculate the actual input box height (including border) for a given area height and width.
+    pub fn calculate_input_box_height(&self, area_height: u16, area_width: u16) -> u16 {
+        let input_text_lines = self.calculate_input_lines(area_width);
+        let min_input_height = 3u16;
+        let max_input_height = (area_height / 2).max(min_input_height);
+        (input_text_lines + 1).clamp(min_input_height, max_input_height)
+    }
+
+    /// Get cursor position for rendering with the given input area dimensions.
+    /// Returns Some((x, y)) if cursor should be shown, None otherwise.
+    /// Coordinates are relative to the input box inner area.
+    pub fn get_cursor_position(&self, input_area_width: u16) -> Option<(u16, u16)> {
+        let prompt = "> ";
+        let prompt_width = prompt.len() as u16;
+
+        // Calculate available width for text (excluding prompt)
+        let available_width = input_area_width.saturating_sub(prompt_width);
+        if available_width == 0 {
+            return None;
+        }
+
+        // Get text before cursor
+        let before_cursor = &self.input_buffer[..self.input_cursor];
+
+        // Calculate cursor position considering line wrapping and newlines
+        let mut x = prompt_width;
+        let mut y = 0u16;
+
+        for ch in before_cursor.chars() {
+            if ch == '\n' {
+                // Manual newline: move to start of next line
+                x = 0;
+                y += 1;
+                continue;
+            }
+
+            let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+
+            if x + char_width > input_area_width {
+                // Wrap to next line
+                x = 0;
+                y += 1;
+            }
+            x += char_width;
+        }
+
+        Some((x, y))
+    }
 }
 
 
@@ -404,13 +495,16 @@ impl TuiAssistant {
 
 impl Widget for &TuiAssistant {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Split into three regions: tabs (1 line), messages (flexible), input (3 lines)
+        // Calculate dynamic input box height based on content
+        let input_box_height = self.calculate_input_box_height(area.height, area.width);
+
+        // Split into three regions: tabs (1 line), messages (flexible), input (dynamic)
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // Tab bar
-                Constraint::Min(1),    // Message list
-                Constraint::Length(3), // Input box
+                Constraint::Length(1),              // Tab bar
+                Constraint::Min(1),                 // Message list
+                Constraint::Length(input_box_height), // Input box (dynamic)
             ])
             .split(area);
 
@@ -457,6 +551,68 @@ fn render_tab_bar(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
     paragraph.render(area, buf);
 }
 
+/// Wrap text to fit within a given width, returning multiple lines.
+/// Uses the `textwrap` crate for intelligent word-boundary wrapping.
+///
+/// This function handles text wrapping to ensure accurate line counting
+/// for scrolling calculations. We can't use Paragraph.wrap() because:
+///
+/// 1. Paragraph.wrap() only executes during render(), but we need line counts BEFORE rendering
+/// 2. Ratatui doesn't provide a public API to pre-calculate wrapped line counts
+/// 3. Using textwrap gives us smart word-boundary wrapping and precise line counting
+fn wrap_text_lines(text: &str, width: u16, prefix: &str) -> Vec<Line<'static>> {
+    if width == 0 {
+        return vec![Line::from(text.to_string())];
+    }
+
+    let mut result_lines = Vec::new();
+    let prefix_width = unicode_width::UnicodeWidthStr::width(prefix);
+
+    // Split by manual newlines first
+    let paragraphs: Vec<&str> = text.split('\n').collect();
+
+    for (para_idx, paragraph) in paragraphs.iter().enumerate() {
+        if para_idx == 0 {
+            // First paragraph: first line has prefix, subsequent lines are indented
+            if paragraph.is_empty() {
+                result_lines.push(Line::from(prefix.to_string()));
+            } else {
+                let first_line_width = (width as usize).saturating_sub(prefix_width);
+                let wrapped = textwrap::wrap(paragraph, first_line_width.max(10));
+
+                for (i, line) in wrapped.iter().enumerate() {
+                    if i == 0 {
+                        // First line with prefix
+                        result_lines.push(Line::from(format!("{}{}", prefix, line)));
+                    } else {
+                        // Continuation lines with indentation
+                        result_lines.push(Line::from(format!("{:width$}{}", "", line, width = prefix_width)));
+                    }
+                }
+            }
+        } else {
+            // Subsequent paragraphs (after manual newlines): all lines are indented
+            if paragraph.is_empty() {
+                // Empty line (from consecutive newlines)
+                result_lines.push(Line::from(format!("{:width$}", "", width = prefix_width)));
+            } else {
+                let wrap_width = (width as usize).saturating_sub(prefix_width);
+                let wrapped = textwrap::wrap(paragraph, wrap_width.max(10));
+                for line in wrapped {
+                    result_lines.push(Line::from(format!("{:width$}{}", "", line, width = prefix_width)));
+                }
+            }
+        }
+    }
+
+    // Ensure we have at least one line
+    if result_lines.is_empty() {
+        result_lines.push(Line::from(prefix.to_string()));
+    }
+
+    result_lines
+}
+
 /// Render the message list area
 fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
     if area.height == 0 || area.width == 0 {
@@ -469,20 +625,26 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
     for msg in &assistant.messages {
         match msg {
             ChatMessage::User { text } => {
-                all_lines.push(Line::from(vec![
-                    Span::styled("You: ", Style::default().fg(Color::Green).bold()),
-                    Span::raw(text),
-                ]));
+                // Manually wrap user message text
+                let wrapped = wrap_text_lines(text, area.width, "You: ");
+                for (i, line) in wrapped.into_iter().enumerate() {
+                    if i == 0 {
+                        // First line with styled prefix
+                        let line_str = line.to_string();
+                        let content = line_str.trim_start_matches("You: ").to_string();
+                        all_lines.push(Line::from(vec![
+                            Span::styled("You: ", Style::default().fg(Color::Green).bold()),
+                            Span::raw(content),
+                        ]));
+                    } else {
+                        // Continuation lines
+                        all_lines.push(line);
+                    }
+                }
                 all_lines.push(Line::raw("")); // Empty line after message
             }
             ChatMessage::Assistant { text, is_streaming } => {
-                let prefix = if *is_streaming {
-                    Span::styled("AI: ", Style::default().fg(Color::Cyan).bold())
-                } else {
-                    Span::styled("AI: ", Style::default().fg(Color::Cyan).bold())
-                };
-
-                // Split long text into multiple lines for better display
+                // Prepare content with streaming indicator
                 let content = if *is_streaming && text.is_empty() {
                     "...".to_string()
                 } else if *is_streaming {
@@ -491,7 +653,22 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
                     text.clone()
                 };
 
-                all_lines.push(Line::from(vec![prefix, Span::raw(content)]));
+                // Manually wrap assistant message text
+                let wrapped = wrap_text_lines(&content, area.width, "AI: ");
+                for (i, line) in wrapped.into_iter().enumerate() {
+                    if i == 0 {
+                        // First line with styled prefix
+                        let line_str = line.to_string();
+                        let content = line_str.trim_start_matches("AI: ").to_string();
+                        all_lines.push(Line::from(vec![
+                            Span::styled("AI: ", Style::default().fg(Color::Cyan).bold()),
+                            Span::raw(content),
+                        ]));
+                    } else {
+                        // Continuation lines
+                        all_lines.push(line);
+                    }
+                }
                 all_lines.push(Line::raw("")); // Empty line after message
             }
             ChatMessage::CommandCard {
@@ -521,7 +698,8 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
     let skip = effective_scroll as usize;
     let visible: Vec<Line> = all_lines.into_iter().skip(skip).take(visible_lines as usize).collect();
 
-    let paragraph = Paragraph::new(visible).wrap(Wrap { trim: false });
+    // Render without wrap since we already handled wrapping manually
+    let paragraph = Paragraph::new(visible);
     paragraph.render(area, buf);
 }
 
@@ -536,7 +714,7 @@ fn render_command_card(
 
     // Card border style based on status
     let (border_color, status_text) = match status {
-        CommandStatus::Pending => (Color::Yellow, "[Y] Execute  [N] Cancel"),
+        CommandStatus::Pending => (Color::Yellow, "[Ctrl+Y] Execute  [Ctrl+N] Cancel"),
         CommandStatus::Executed => (Color::Green, "Executed"),
         CommandStatus::Rejected => (Color::Red, "Rejected"),
     };
@@ -598,7 +776,7 @@ fn format_card_line(text: &str, width: usize) -> String {
     }
 }
 
-/// Render the input box at the bottom
+/// Render the input box at the bottom with multi-line support
 fn render_input_box(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
     let block = Block::default()
         .borders(Borders::TOP)
@@ -607,32 +785,58 @@ fn render_input_box(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
     let inner = block.inner(area);
     block.render(area, buf);
 
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
     // Render input prompt and text
     let prompt = "> ";
+    let prompt_width = prompt.len() as u16;
     let input_text = assistant.get_input();
 
-    // Calculate cursor position for display
-    let cursor_byte_pos = assistant.cursor_position();
-    let cursor_char_pos = input_text[..cursor_byte_pos].chars().count();
+    // Build lines with wrapping (no auto-formatting, just hard wrap at width)
+    let mut lines: Vec<Line> = Vec::new();
+    let mut current_line_spans: Vec<Span> = Vec::new();
 
-    // Build the display line with cursor
-    let before_cursor: String = input_text.chars().take(cursor_char_pos).collect();
-    let cursor_char: String = input_text.chars().skip(cursor_char_pos).take(1).collect();
-    let after_cursor: String = input_text.chars().skip(cursor_char_pos + 1).collect();
+    // Add prompt at the beginning
+    current_line_spans.push(Span::styled(prompt, Style::default().fg(Color::Cyan)));
+    let mut current_x = prompt_width;
 
-    let cursor_display = if cursor_char.is_empty() {
-        Span::styled(" ", Style::default().bg(Color::White))
-    } else {
-        Span::styled(cursor_char, Style::default().bg(Color::White).fg(Color::Black))
-    };
+    // Process each character
+    for ch in input_text.chars() {
+        if ch == '\n' {
+            // Manual newline: finish current line and start a new one
+            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+            current_x = 0;
+            continue;
+        }
 
-    let line = Line::from(vec![
-        Span::styled(prompt, Style::default().fg(Color::Cyan)),
-        Span::raw(before_cursor),
-        cursor_display,
-        Span::raw(after_cursor),
-    ]);
+        let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
 
-    let paragraph = Paragraph::new(line);
+        // Check if we need to wrap
+        if current_x + char_width > inner.width {
+            // Finish current line and start a new one
+            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+            current_x = 0;
+        }
+
+        // Add character
+        // Note: We don't render cursor here anymore - it will be a real cursor
+        current_line_spans.push(Span::raw(ch.to_string()));
+        current_x += char_width;
+    }
+
+    // Add remaining spans to the last line
+    if !current_line_spans.is_empty() {
+        lines.push(Line::from(current_line_spans));
+    }
+
+    // Ensure at least one line exists
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(prompt, Style::default().fg(Color::Cyan))));
+    }
+
+    // Render the lines
+    let paragraph = Paragraph::new(lines);
     paragraph.render(inner, buf);
 }

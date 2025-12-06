@@ -6,7 +6,27 @@
 
 use crate::context::ContextSnapshot;
 
-/// Build a comprehensive prompt for the AI including system context
+/// System prompt that defines the AI assistant's behavior and personality.
+pub const SYSTEM_PROMPT: &str = r#"You are an expert shell command assistant integrated into a terminal emulator. Your role is to help users execute shell commands safely and efficiently.
+
+Guidelines:
+1. Understand the user's natural language request.
+2. Suggest a single, safe, correct shell command that accomplishes the goal.
+3. Explain what the command does and any potential side effects.
+4. If the command could be dangerous (deleting files, modifying system settings), warn the user.
+5. Consider the user's current directory and environment.
+6. Prefer portable POSIX-compliant commands when possible.
+
+Response Format:
+You must strictly follow this format for the parser to understand your response:
+
+COMMAND: <the actual command>
+EXPLANATION: <what it does and why>
+ALTERNATIVES: <optional alternative commands, one per line>
+
+Be concise but thorough. Safety first."#;
+
+/// Build a complete prompt for the AI including context and user query.
 pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> String {
     let mut prompt = String::new();
 
@@ -15,58 +35,43 @@ pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> String {
     prompt.push_str(user_query);
     prompt.push_str("\n\n");
 
-    // Current working directory
-    prompt.push_str("CURRENT DIRECTORY:\n");
-    prompt.push_str(&ctx.cwd);
-    prompt.push_str("\n\n");
+    // System Context
+    prompt.push_str("--- Context ---\n");
+    prompt.push_str(&ctx.format_for_prompt());
 
-    // Recent command history (if available)
-    if !ctx.recent_history.is_empty() {
-        prompt.push_str("RECENT COMMAND HISTORY:\n");
-        for (idx, cmd) in ctx.recent_history.iter().rev().take(5).enumerate() {
-            prompt.push_str(&format!("  {}. {}\n", idx + 1, cmd));
-        }
-        prompt.push_str("\n");
-    }
-
-    // Recent terminal output
+    // Recent terminal output (not included in format_for_prompt)
     if !ctx.recent_output.is_empty() {
-        prompt.push_str("RECENT TERMINAL OUTPUT (last few lines):\n");
+        prompt.push_str("\nRECENT TERMINAL OUTPUT (last few lines):\n");
         for line in ctx.recent_output.iter().rev().take(6).rev() {
             prompt.push_str(&format!("  {}\n", line));
         }
-        prompt.push_str("\n");
     }
+    prompt.push_str("\n");
 
-    // Relevant environment variables
-    if !ctx.env_vars.is_empty() {
-        prompt.push_str("RELEVANT ENVIRONMENT:\n");
-        
-        // Filter to show only commonly useful env vars
-        let relevant_vars = ["PATH", "HOME", "USER", "SHELL", "EDITOR", "LANG"];
-        for (key, value) in &ctx.env_vars {
-            if relevant_vars.contains(&key.as_str()) {
-                // Truncate long values (like PATH) safely on char boundaries
-                let display_value = if value.chars().count() > 100 {
-                    let truncated: String = value.chars().take(100).collect();
-                    format!("{}...", truncated)
-                } else {
-                    value.clone()
-                };
-                prompt.push_str(&format!("  {}={}\n", key, display_value));
-            }
-        }
-        prompt.push_str("\n");
-    }
-
-    // Instructions
-    prompt.push_str("Please suggest a shell command to accomplish this task. ");
-    prompt.push_str("Format your response with:\n");
-    prompt.push_str("COMMAND: <the command>\n");
-    prompt.push_str("EXPLANATION: <what it does>\n");
-    prompt.push_str("ALTERNATIVES: <optional alternatives>\n");
+    // Instructions for response format (reinforced here for reliability)
+    prompt.push_str("Please suggest a shell command to accomplish this task.\n");
+    prompt.push_str("Remember to use the strict format:\n");
+    prompt.push_str("COMMAND: <command>\n");
+    prompt.push_str("EXPLANATION: <explanation>\n");
+    prompt.push_str("ALTERNATIVES: <alternatives>\n");
 
     prompt
+}
+
+/// Build a prompt for command explanation.
+pub fn build_explain_prompt(command: &str, ctx: &ContextSnapshot) -> String {
+    format!(
+        "You are a shell command expert. Explain what this command does in detail:\n\n\
+         Command: {command}\n\n\
+         Context:\n{context}\n\n\
+         Provide a clear explanation including:\n\
+         1. What each part of the command does\n\
+         2. What files or resources it will affect\n\
+         3. Any potential risks or side effects\n\
+         4. Safer alternatives if applicable",
+        command = command,
+        context = ctx.format_for_prompt()
+    )
 }
 
 #[cfg(test)]
@@ -89,10 +94,10 @@ mod tests {
 
         assert!(prompt.contains("USER REQUEST:"));
         assert!(prompt.contains("list all files"));
-        assert!(prompt.contains("CURRENT DIRECTORY:"));
-        assert!(prompt.contains("/home/user/projects"));
-        assert!(prompt.contains("RECENT COMMAND HISTORY:"));
-        assert!(prompt.contains("ls -la"));
+        assert!(prompt.contains("Current directory: /home/user/projects"));
+        assert!(prompt.contains("RECENT TERMINAL OUTPUT"));
+        assert!(prompt.contains("output line"));
+        assert!(prompt.contains("COMMAND:"));
     }
 
     #[test]
@@ -108,6 +113,6 @@ mod tests {
 
         assert!(prompt.contains("USER REQUEST:"));
         assert!(prompt.contains("help me"));
-        assert!(prompt.contains("CURRENT DIRECTORY:"));
+        assert!(prompt.contains("Current directory: /"));
     }
 }

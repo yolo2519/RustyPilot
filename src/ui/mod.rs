@@ -5,27 +5,31 @@
 
 // use crossterm::style::Stylize;
 use ratatui::{
-    buffer::Buffer, layout::{Constraint, Direction, Flex, Layout, Rect}, style::{Color, Style, Stylize}, symbols::line, text::Line, widgets::{Block, Borders, Paragraph, Widget}
+    buffer::Buffer,
+    layout::{
+        Constraint, Flex, Layout, Rect
+    },
+    style::{
+        Color, Style, Stylize
+    },
+    symbols::line,
+    text::Line,
+    widgets::{
+        Block, Borders, Paragraph, Widget
+    },
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{ActivePane, App};
 
 pub mod assistant;
+pub mod layout;
 pub mod terminal;
 
 impl Widget for &App {
     fn render(self, area: ratatui::prelude::Rect, buf: &mut ratatui::prelude::Buffer) {
-
-        // Split into three chunks: terminal, separator, assistant
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(60),
-                Constraint::Length(1),
-                Constraint::Min(1),
-            ])
-            .split(area);
+        // Use the pre-calculated layout
+        let layout = self.layout();
 
         let active = self.get_active_pane();
         let cmdmode_color = Color::Yellow;
@@ -33,12 +37,17 @@ impl Widget for &App {
         let active_aicolor = if self.get_command_mode() { cmdmode_color } else { Color::Cyan };
         let inactive_color = if self.get_command_mode() { cmdmode_color } else { Color::DarkGray };
 
-        // Render terminal pane border
+        // Render terminal pane border with scroll indicator
+        let term_title = if self.tui_terminal.is_scrolled() {
+            format!("RustyTerm [Scrolled ↑{}]", self.tui_terminal.scroll_offset())
+        } else {
+            "RustyTerm".to_string()
+        };
         let block_term = Block::default()
-            .title("RustyTerm")
+            .title(term_title)
             .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT)
             .border_style(Style::default().fg(if matches!(active, ActivePane::Terminal) { active_termcolor } else { inactive_color }));
-        let term_area = block_term.inner(chunks[0]);
+        let term_area = layout.terminal_inner;
         // Render terminal pane
         self.tui_terminal.render(term_area, buf);
 
@@ -49,13 +58,18 @@ impl Widget for &App {
             ActivePane::Assistant => ActiveSide::Right(active_aicolor),
         };
         // Render separator
-        render_separator(chunks[1], buf, side, line::Set::default());
+        render_separator(layout.separator_area, buf, side, line::Set::default());
 
+        let ai_title = if self.tui_assistant.is_scrolled() {
+            format!("Assistant [Scrolled ↑{}]", self.tui_assistant.scroll_offset())
+        } else {
+            "Assistant".to_string()
+        };
         let block_ai = Block::default()
-            .title("Assistant")
+            .title(ai_title)
             .borders(Borders::TOP | Borders::BOTTOM | Borders::RIGHT)
             .border_style(Style::default().fg(if matches!(active, ActivePane::Assistant) { active_aicolor } else { inactive_color }));
-        let ai_area = block_ai.inner(chunks[2]);
+        let ai_area = layout.assistant_inner;
         // Render assistant pane
         self.tui_assistant.render(ai_area, buf);
 
@@ -67,16 +81,15 @@ impl Widget for &App {
             ActivePane::Assistant => (block_term, block_ai.title_bottom(hint.fg(Color::Black).bg(active_aicolor))),
         };
 
-        block_term.render(chunks[0], buf);
-        render_separator(chunks[1], buf, side, line::Set::default());
-        block_ai.render(chunks[2], buf);
+        block_term.render(layout.terminal_area, buf);
+        render_separator(layout.separator_area, buf, side, line::Set::default());
+        block_ai.render(layout.assistant_area, buf);
         // Render separator
         if self.get_command_mode() {
             render_command_mode_hint(area, buf, cmdmode_color);
         }
     }
 }
-
 
 #[derive(Clone, Copy, Debug)]
 enum ActiveSide {

@@ -19,6 +19,7 @@ use crate::context::ContextSnapshot;
 use crate::event::{AiStreamData, AppEvent};
 
 use super::client::AiCommandSuggestion;
+
 use super::parser;
 use super::prompt;
 
@@ -70,7 +71,7 @@ impl AiSessionManager {
         app_event_tx: UnboundedSender<AppEvent>,
         model: impl Into<String>,
     ) -> Result<Self, OpenAIError> {
-        let system_prompt = Self::default_system_prompt();
+        let system_prompt = prompt::SYSTEM_PROMPT.to_string();
         let mut manager = Self {
             sessions: HashMap::new(),
             current_id: 1,
@@ -82,31 +83,6 @@ impl AiSessionManager {
         };
         manager.sessions.insert(1, AiSession::new(1, system_prompt)?);
         Ok(manager)
-    }
-
-    /// Default system prompt for shell command assistance
-    fn default_system_prompt() -> String {
-        r#"You are an expert shell command assistant. Your role is to help users by:
-
-1. Understanding their natural language requests
-2. Suggesting safe, correct shell commands
-3. Explaining what the commands do
-4. Providing alternatives when appropriate
-
-When suggesting commands:
-- Always explain what the command does
-- Warn about potentially dangerous operations
-- Consider the user's current directory and environment
-- Prefer standard POSIX commands when possible
-- Format your response clearly
-
-If you suggest a command, format it like this:
-COMMAND: <the actual command>
-EXPLANATION: <what it does and why>
-ALTERNATIVES: <optional alternative commands, one per line>
-
-Be concise but thorough. Safety first."#
-            .to_string()
     }
 
     pub fn current_session(&self) -> Option<&AiSession> {
@@ -150,7 +126,7 @@ Be concise but thorough. Safety first."#
     pub fn new_session(&mut self) -> Result<SessionId, OpenAIError> {
         let id = self.next_id;
         self.next_id += 1;
-        let system_prompt = Self::default_system_prompt();
+        let system_prompt = prompt::SYSTEM_PROMPT.to_string();
         self.sessions.insert(id, AiSession::new(id, system_prompt)?);
         self.current_id = id;
         Ok(id)

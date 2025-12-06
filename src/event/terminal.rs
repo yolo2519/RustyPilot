@@ -11,10 +11,48 @@ use crate::shell::ShellManager;
 /// This function processes keyboard input for the terminal emulator,
 /// forwarding keystrokes to the PTY.
 pub fn handle_key_event(
-    _terminal: &mut TuiTerminal,
+    terminal: &mut TuiTerminal,
     shell: &mut ShellManager,
     key_evt: KeyEvent,
 ) -> Result<()> {
+    let KeyEvent { code, modifiers, .. } = key_evt;
+    let shift = modifiers.contains(KeyModifiers::SHIFT);
+    
+    // Handle scrolling with Shift + PageUp/PageDown/Up/Down
+    if shift {
+        match code {
+            KeyCode::PageUp => {
+                terminal.scroll_up(10);
+                return Ok(());
+            }
+            KeyCode::PageDown => {
+                terminal.scroll_down(10);
+                return Ok(());
+            }
+            KeyCode::Up => {
+                terminal.scroll_up(1);
+                return Ok(());
+            }
+            KeyCode::Down => {
+                terminal.scroll_down(1);
+                return Ok(());
+            }
+            KeyCode::End => {
+                terminal.scroll_to_bottom();
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+    
+    // For any other input, if scrolled back, auto-scroll to bottom
+    if terminal.is_scrolled() {
+        // Only auto-scroll for actual input keys (not just modifiers)
+        if !matches!(code, KeyCode::Null) {
+            terminal.scroll_to_bottom();
+        }
+    }
+    
     // Convert key event to bytes and forward to shell
     let bytes = key_to_bytes(key_evt);
     if !bytes.is_empty() {

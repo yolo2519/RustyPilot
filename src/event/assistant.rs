@@ -10,16 +10,23 @@ use crate::ui::assistant::TuiAssistant;
 ///
 /// This function processes keyboard input for the assistant sidebar,
 /// including text input, command confirmation, scrolling, and session switching.
+///
+/// # Arguments
+/// * `assistant` - The assistant UI widget
+/// * `ai_sessions` - The AI session manager
+/// * `key_evt` - The key event to handle
+/// * `context` - Current shell context for AI requests
 pub fn handle_key_event(
     assistant: &mut TuiAssistant,
     ai_sessions: &mut AiSessionManager,
     context_manager: &crate::context::ContextManager,
     key_evt: KeyEvent,
 ) -> Result<()> {
-    // Check for pending command confirmation first (Y/N shortcuts)
+    // Check for pending command confirmation first (Ctrl+Y / Ctrl+N shortcuts)
     if assistant.has_pending_command() {
         match key_evt.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Char('y') | KeyCode::Char('Y')
+                if key_evt.modifiers.contains(KeyModifiers::CONTROL) => {
                 // Update UI to show command as executed
                 assistant.confirm_command();
 
@@ -30,7 +37,8 @@ pub fn handle_key_event(
 
                 return Ok(());
             }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
+            KeyCode::Char('n') | KeyCode::Char('N')
+                if key_evt.modifiers.contains(KeyModifiers::CONTROL) => {
                 assistant.reject_command();
                 return Ok(());
             }
@@ -63,6 +71,13 @@ pub fn handle_key_event(
         KeyCode::Home => {
             assistant.move_cursor_to_start();
         }
+
+        // Scroll to bottom with Shift+End or Ctrl+End (must come before plain End)
+        KeyCode::End if key_evt.modifiers.contains(KeyModifiers::SHIFT)
+                     || key_evt.modifiers.contains(KeyModifiers::CONTROL) => {
+            assistant.scroll_to_bottom();
+        }
+
         KeyCode::End => {
             assistant.move_cursor_to_end();
         }
@@ -81,16 +96,22 @@ pub fn handle_key_event(
             assistant.scroll(10);
         }
 
-        // Submit message
+        // Submit message (Enter) or insert newline (Shift+Enter)
         KeyCode::Enter => {
-            let input = assistant.take_input();
-            if !input.trim().is_empty() {
-                let session_id = assistant.active_session_id();
-                assistant.push_user_message(input.clone());
-                assistant.start_assistant_message();
-                // Send to AI backend - response will come through ai_stream channel
-                let context = context_manager.snapshot();
-                ai_sessions.send_message(session_id, &input, context);
+            if key_evt.modifiers.contains(KeyModifiers::SHIFT) {
+                // Shift+Enter: Insert a newline character
+                assistant.insert_char('\n');
+            } else {
+                // Enter: Submit the message
+                let input = assistant.take_input();
+                if !input.trim().is_empty() {
+                    let session_id = assistant.active_session_id();
+                    assistant.push_user_message(input.clone());
+                    assistant.start_assistant_message();
+                    // Send to AI backend - response will come through ai_stream channel
+                    let context = context_manager.snapshot();
+                    ai_sessions.send_message(session_id, &input, context);
+                }
             }
         }
 

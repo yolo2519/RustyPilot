@@ -136,7 +136,7 @@ pub enum AppEvent {
     ShellError {
         message: String,
     },
-    
+
     /// Shell command execution completed
     ShellCommandCompleted {
         command: String,
@@ -147,6 +147,9 @@ pub enum AppEvent {
     ShellOutput {
         data: String,
     },
+
+    /// Terminal request of writing PTY
+    PtyWrite(Vec<u8>),
 }
 
 /// Initializes the application event system.
@@ -167,7 +170,7 @@ pub enum AppEvent {
 ///
 /// The sender should be passed to components that need to emit events,
 /// while the receiver is used in the main event loop to handle these events.
-/// 
+///
 /// Unbounded is appropriate here because AppEvent is low-frequency and lightweight.
 pub fn init_app_eventsource() -> (UnboundedSender<AppEvent>, UnboundedReceiver<AppEvent>) {
     mpsc::unbounded_channel()

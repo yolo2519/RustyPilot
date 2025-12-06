@@ -65,17 +65,31 @@ impl Dimensions for &TermSize {
 
 /// Minimal event listener that ignores all terminal events.
 #[derive(Clone)]
-struct TerminalEventListener;
+struct TerminalEventListener {
+    app_event_sink: UnboundedSender<AppEvent>,
+}
 
 impl TerminalEventListener {
-    fn new() -> Self {
-        Self
+    fn new(app_event_sink: UnboundedSender<AppEvent>) -> Self {
+        Self {
+            app_event_sink,
+        }
     }
 }
 
 impl EventListener for TerminalEventListener {
-    fn send_event(&self, _event: Event) {
-        // Ignore all events
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::PtyWrite(s) => {
+                if let Err(e) = self.app_event_sink.send(AppEvent::PtyWrite(s.into_bytes())) {
+                    eprintln!("Failed to send PtyWrite event: {}", e);
+                    // TODO: this is not pretty, but we don't have anything else to handle the error
+                    // We should later have a global logger for this kind of issue.
+                    // the Err variant is very unlikely to be yielded.
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -99,7 +113,7 @@ impl TuiTerminal {
         let cols = 80;
         let rows = 24;
 
-        let event_listener = TerminalEventListener::new();
+        let event_listener = TerminalEventListener::new(event_sink.clone());
         let config = Config::default();
         let size = TermSize::new(cols, rows);
         let term = Term::new(config, &size, event_listener);
@@ -208,8 +222,10 @@ impl TuiTerminal {
 
         // Iterate through visible lines, considering scroll offset
         for line_idx in 0..screen_lines {
+            // When scrolled up, we want to show lines from history
+            // line_idx 0 at scroll_offset N should show line -N
             let actual_line_idx = if self.scroll_offset > 0 {
-                -((self.scroll_offset - line_idx) as i32)
+                line_idx as i32 - self.scroll_offset as i32
             } else {
                 line_idx as i32
             };
@@ -303,13 +319,13 @@ impl Widget for &TuiTerminal {
         }
 
         let lines = self.get_lines();
-        
+
         // Render lines directly to buffer
         for (row, line) in lines.iter().enumerate() {
             if row >= area.height as usize {
                 break;
             }
-            
+
             let mut x = area.x;
             for span in &line.spans {
                 let content = &span.content;
