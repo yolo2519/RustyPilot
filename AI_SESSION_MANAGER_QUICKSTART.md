@@ -249,3 +249,4 @@ cargo run --example ai_session_demo
 - Run `cargo run --example ai_session_demo` for interactive demo
 - Check `examples/tui_chat_assistant.rs` for UI patterns
 
+

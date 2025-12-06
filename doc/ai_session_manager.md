@@ -335,3 +335,4 @@ The AI Session Manager is designed to work alongside the Shell Manager:
 - [ ] Multi-turn command refinement
 - [ ] Command safety scoring
 
+
