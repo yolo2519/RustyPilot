@@ -83,7 +83,7 @@ impl App {
 
         Ok(Self {
             shell_manager: shell,
-            ai_sessions: AiSessionManager::new(ai_stream_tx, event_sink.clone()),
+            ai_sessions: AiSessionManager::new(ai_stream_tx, event_sink.clone(), "gpt-4o-mini")?,
             tui_terminal: TuiTerminal::new(pty_rx, event_sink.clone()),
             tui_assistant: TuiAssistant::new(ai_stream_rx),
             active_pane: ActivePane::Terminal,
@@ -188,7 +188,7 @@ impl App {
                     let app_evt = res.with_context(|| anyhow::anyhow!("App event stream is ended"))?;
                     self.handle_app_event(app_evt)?;
                 }
-                _ = self.tui_assistant.recv_ai_stream() => {
+                _ = self.tui_assistant.recv_ai_stream(&mut self.ai_sessions) => {
                     // AI stream data is handled internally by TuiAssistant
                 }
                 _ = self.tui_terminal.recv_pty_output() => {
@@ -310,12 +310,11 @@ impl App {
                     }
                     ActivePane::Assistant => {
                         // Get current context snapshot for AI requests
-                        let context = self.context_manager.snapshot();
                         assistant_event::handle_key_event(
                             &mut self.tui_assistant,
                             &mut self.ai_sessions,
+                            &self.context_manager,
                             key_evt,
-                            context,
                         )?;
                     }
                 }
@@ -385,8 +384,12 @@ impl App {
             }
 
             AppEvent::ShellCommandCompleted { command, exit_code } => {
-                // TODO: Update context manager with command history
-                let _ = (command, exit_code); // Suppress unused warnings
+                self.context_manager.history.push(command);
+                let _ = exit_code; // Suppress unused warnings for now
+            }
+
+            AppEvent::ShellOutput { data } => {
+                self.context_manager.push_output(data);
             }
         }
         Ok(())

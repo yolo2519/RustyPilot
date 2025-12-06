@@ -4,7 +4,6 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::ai::session::AiSessionManager;
-use crate::context::ContextSnapshot;
 use crate::ui::assistant::TuiAssistant;
 
 /// Handle key events when the Assistant pane is active.
@@ -20,8 +19,8 @@ use crate::ui::assistant::TuiAssistant;
 pub fn handle_key_event(
     assistant: &mut TuiAssistant,
     ai_sessions: &mut AiSessionManager,
+    context_manager: &crate::context::ContextManager,
     key_evt: KeyEvent,
-    context: ContextSnapshot,
 ) -> Result<()> {
     // Check for pending command confirmation first (Ctrl+Y / Ctrl+N shortcuts)
     if assistant.has_pending_command() {
@@ -110,6 +109,7 @@ pub fn handle_key_event(
                     assistant.push_user_message(input.clone());
                     assistant.start_assistant_message();
                     // Send to AI backend - response will come through ai_stream channel
+                    let context = context_manager.snapshot();
                     ai_sessions.send_message(session_id, &input, context);
                 }
             }

@@ -143,6 +143,11 @@ pub enum AppEvent {
         exit_code: i32,
     },
 
+    /// Shell produced output chunk (throttled to short snippets)
+    ShellOutput {
+        data: String,
+    },
+
     /// Terminal request of writing PTY
     PtyWrite(Vec<u8>),
 }

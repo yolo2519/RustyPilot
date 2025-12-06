@@ -98,7 +98,7 @@ pub struct TuiTerminal {
     term: Term<TerminalEventListener>,
     processor: Processor,
     pty_output: Receiver<Vec<u8>>,
-    _event_sink: UnboundedSender<AppEvent>,
+    event_sink: UnboundedSender<AppEvent>,
     scroll_offset: usize,
     error_message: Option<String>,
 }
@@ -122,7 +122,7 @@ impl TuiTerminal {
             term,
             processor: Processor::new(),
             pty_output,
-            _event_sink: event_sink,
+            event_sink,
             scroll_offset: 0,
             error_message: None,
         }
@@ -132,6 +132,16 @@ impl TuiTerminal {
     /// Call this in tokio::select! to handle async PTY data.
     pub async fn recv_pty_output(&mut self) {
         if let Some(bytes) = self.pty_output.recv().await {
+            // Emit a small text snippet for context building
+            let snippet = String::from_utf8_lossy(&bytes);
+            let trimmed = snippet.trim();
+            if !trimmed.is_empty() {
+                // Limit to avoid flooding the event channel
+                let truncated: String = trimmed.chars().take(400).collect();
+                let _ = self
+                    .event_sink
+                    .send(AppEvent::ShellOutput { data: truncated });
+            }
             self.process(&bytes);
         }
     }
