@@ -52,19 +52,19 @@ pub struct App {
 impl App {
     pub fn new() -> Result<Self> {
         let (event_sink, app_events) = init_app_eventsource();
-        
+
         // Start with reasonable default size (will be resized on first draw)
         let cols = 80;
         let rows = 24;
-        
+
         let (shell, pty_rx) = ShellManager::new(event_sink.clone(), cols, rows)?;
-        
+
         // Create dedicated channel for AI streaming (high-frequency data)
         let (ai_stream_tx, ai_stream_rx) = mpsc::channel::<AiStreamData>(256);
-        
+
         Ok(Self {
             shell_manager: shell,
-            ai_sessions: AiSessionManager::new(ai_stream_tx, event_sink.clone(), "gpt-4o-mini"),
+            ai_sessions: AiSessionManager::new(ai_stream_tx, event_sink.clone(), "gpt-4o-mini")?,
             tui_terminal: TuiTerminal::new(pty_rx, event_sink.clone()),
             tui_assistant: TuiAssistant::new(ai_stream_rx),
             active_pane: ActivePane::Terminal,
@@ -224,13 +224,13 @@ impl App {
             AppEvent::ShellError { message } => {
                 // Display error in terminal pane
                 self.tui_terminal.show_error(&message);
-                
+
                 // If shell exited, mark app for exit
                 if message.contains("exited") {
                     self.exit = true;
                 }
             }
-            
+
             AppEvent::ShellCommandCompleted { command, exit_code } => {
                 self.context_manager.history.push(command);
                 let _ = exit_code; // Suppress unused warnings for now

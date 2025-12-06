@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use async_openai::error::OpenAIError;
 use async_openai::types::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
@@ -37,19 +38,18 @@ pub struct AiSession {
 }
 
 impl AiSession {
-    fn new(id: SessionId, system_prompt: String) -> Self {
+    fn new(id: SessionId, system_prompt: String) -> Result<Self, OpenAIError> {
         let system_msg = ChatCompletionRequestSystemMessageArgs::default()
             .content(system_prompt)
-            .build()
-            .expect("Failed to build system message")
+            .build()?
             .into();
 
-        Self {
+        Ok(Self {
             id,
             conversation_history: vec![system_msg],
             last_suggestion: None,
             current_response: String::new(),
-        }
+        })
     }
 }
 
@@ -69,7 +69,7 @@ impl AiSessionManager {
         ai_stream_tx: Sender<AiStreamData>,
         app_event_tx: UnboundedSender<AppEvent>,
         model: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self, OpenAIError> {
         let system_prompt = Self::default_system_prompt();
         let mut manager = Self {
             sessions: HashMap::new(),
@@ -80,8 +80,8 @@ impl AiSessionManager {
             client: Client::new(),
             model: model.into(),
         };
-        manager.sessions.insert(1, AiSession::new(1, system_prompt));
-        manager
+        manager.sessions.insert(1, AiSession::new(1, system_prompt)?);
+        Ok(manager)
     }
 
     /// Default system prompt for shell command assistance
@@ -147,13 +147,13 @@ Be concise but thorough. Safety first."#
         Ok(())
     }
 
-    pub fn new_session(&mut self) -> SessionId {
+    pub fn new_session(&mut self) -> Result<SessionId, OpenAIError> {
         let id = self.next_id;
         self.next_id += 1;
         let system_prompt = Self::default_system_prompt();
-        self.sessions.insert(id, AiSession::new(id, system_prompt));
+        self.sessions.insert(id, AiSession::new(id, system_prompt)?);
         self.current_id = id;
-        id
+        Ok(id)
     }
 
     /// Send a message to the AI with system context and receive a streaming response.
@@ -222,7 +222,6 @@ Be concise but thorough. Safety first."#
 
         // Clone what we need for the async task
         let stream_tx = self.ai_stream_tx.clone();
-        let event_tx = self.app_event_tx.clone();
         let client = self.client.clone();
 
         // Spawn async task to handle streaming

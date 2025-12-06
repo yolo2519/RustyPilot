@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         ai_stream_tx,
         app_event_tx,
         "gpt-4o-mini", // Use a real model name
-    );
+    )?;
 
     println!("✓ AI Session Manager initialized");
     println!("✓ Session ID: {}\n", session_manager.current_session_id());
@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
             "cargo test".to_string(),
             "git status".to_string(),
         ],
+        recent_output: vec![],
     };
 
     println!("Context:");
@@ -88,7 +89,7 @@ async fn main() -> Result<()> {
 
         // Handle special commands
         if input == "new" {
-            let new_id = session_manager.new_session();
+            let new_id = session_manager.new_session()?;
             println!("✓ Created new session: {}\n", new_id);
             continue;
         }
@@ -187,5 +188,3 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-
-
