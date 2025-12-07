@@ -5,13 +5,15 @@
 //! - Chat message display (user messages, AI responses, command cards)
 //! - Streaming AI response rendering
 //! - Command suggestion cards with execute/cancel actions
-//! - Text input with cursor support
+//! - Multi-line text input with cursor support (Ctrl+O for newline)
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::Buffer;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use unicode_width::UnicodeWidthStr;
+use std::cell::Cell;
 use tokio::sync::mpsc::Receiver;
 
 use crate::ai::session::SessionId;
@@ -78,14 +80,41 @@ pub struct TuiAssistant {
     input_buffer: String,
     input_cursor: usize,
 
-    // Scroll state
-    scroll_offset: u16,
+    // Scroll state (0 = at bottom, >0 = scrolled up by N lines)
+    scroll_offset: usize,
 
     // Pending command (index into messages vec)
     pending_command_idx: Option<usize>,
 
     // ID counter for new sessions
     next_session_id: SessionId,
+
+    // Cached rendering dimensions (updated during render, uses Cell for interior mutability)
+    last_input_area_width: Cell<u16>,
+
+    // Cached max scroll offset (updated during render)
+    max_scroll_offset: Cell<usize>,
+}
+
+impl TuiAssistant {
+    /// Input prompt prefix (normal state)
+    const INPUT_PROMPT: &'static str = "> ";
+    /// Input prompt when AI is streaming (same length as normal prompt)
+    const STREAMING_PROMPT: &'static str = "⋯ ";
+
+    /// Get the input prompt based on current state
+    fn prompt(&self) -> &str {
+        if self.is_streaming() {
+            Self::STREAMING_PROMPT
+        } else {
+            Self::INPUT_PROMPT
+        }
+    }
+
+    /// Get the input prompt width in characters
+    fn prompt_width(&self) -> u16 {
+        self.prompt().width() as u16
+    }
 }
 
 impl TuiAssistant {
@@ -104,7 +133,14 @@ impl TuiAssistant {
             scroll_offset: 0,
             pending_command_idx: None,
             next_session_id: 2,
+            last_input_area_width: Cell::new(80), // Default value
+            max_scroll_offset: Cell::new(0),
         }
+    }
+
+    /// Get the last known input area width (updated during rendering)
+    pub fn input_area_width(&self) -> u16 {
+        self.last_input_area_width.get()
     }
 
     /// Await on the AI stream and process incoming data.
@@ -153,12 +189,15 @@ impl TuiAssistant {
     /// Switch to a different session by ID
     pub fn switch_session(&mut self, id: SessionId) {
         if self.session_tabs.iter().any(|t| t.id == id) {
-            self.active_session = id;
-            // TODO: Load messages for this session from backend
-            // For now, clear messages when switching (backend integration pending)
-            self.messages.clear();
-            self.scroll_offset = 0;
-            self.pending_command_idx = None;
+            // Only clear messages if actually switching to a different session
+            if self.active_session != id {
+                self.active_session = id;
+                // TODO: Load messages for this session from backend
+                // For now, clear messages when switching (backend integration pending)
+                self.messages.clear();
+                self.scroll_offset = 0;
+                self.pending_command_idx = None;
+            }
         }
     }
 
@@ -374,29 +413,40 @@ impl TuiAssistant {
     // Scrolling
     // ========================================================================
 
-    /// Scroll the message list by delta lines (positive = down, negative = up)
+    /// Scroll the message list by delta lines (negative = up/back, positive = down/forward)
     pub fn scroll(&mut self, delta: i16) {
         if delta < 0 {
-            self.scroll_offset = self.scroll_offset.saturating_sub((-delta) as u16);
+            // Scrolling up (into history) - increase offset, but limit to max
+            let max_scroll = self.max_scroll_offset.get();
+            self.scroll_offset = (self.scroll_offset.saturating_add((-delta) as usize)).min(max_scroll);
         } else {
-            self.scroll_offset = self.scroll_offset.saturating_add(delta as u16);
+            // Scrolling down (toward latest) - decrease offset
+            self.scroll_offset = self.scroll_offset.saturating_sub(delta as usize);
         }
     }
 
     /// Scroll to the bottom of the message list
     pub fn scroll_to_bottom(&mut self) {
-        // This will be adjusted during rendering based on actual content height
-        self.scroll_offset = u16::MAX;
+        self.scroll_offset = 0;
     }
 
     /// Get current scroll offset
-    pub fn scroll_offset(&self) -> u16 {
+    pub fn scroll_offset(&self) -> usize {
         self.scroll_offset
     }
 
     /// Check if we're scrolled back (not at bottom)
     pub fn is_scrolled(&self) -> bool {
-        self.scroll_offset != u16::MAX && self.scroll_offset > 0
+        self.scroll_offset > 0
+    }
+
+    /// Check if there's a message currently being streamed
+    pub fn is_streaming(&self) -> bool {
+        if let Some(ChatMessage::Assistant { is_streaming, .. }) = self.messages.last() {
+            *is_streaming
+        } else {
+            false
+        }
     }
 
     /// Calculate the number of lines needed to display the input text.
@@ -406,8 +456,7 @@ impl TuiAssistant {
             return 1;
         }
 
-        let prompt = "> ";
-        let prompt_width = prompt.len() as u16;
+        let prompt_width = self.prompt_width();
 
         if self.input_buffer.is_empty() {
             return 1;
@@ -438,6 +487,186 @@ impl TuiAssistant {
         lines
     }
 
+    /// Move cursor up one line in multi-line input
+    pub fn move_cursor_up(&mut self, input_area_width: u16) {
+        if input_area_width == 0 {
+            return;
+        }
+
+        let prompt_width = self.prompt_width();
+        let before_cursor = &self.input_buffer[..self.input_cursor];
+
+        // Track line starts and calculate current screen column
+        let mut current_line_start = 0;
+        let mut prev_line_start = 0;
+        let mut x = prompt_width; // First line starts after prompt
+        let mut byte_pos = 0;
+
+        for ch in before_cursor.chars() {
+            if ch == '\n' {
+                prev_line_start = current_line_start;
+                current_line_start = byte_pos + ch.len_utf8();
+                x = 0; // Lines after first start at column 0
+            } else {
+                let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+                if x + char_width > input_area_width {
+                    // Auto-wrap
+                    prev_line_start = current_line_start;
+                    current_line_start = byte_pos;
+                    x = char_width;
+                } else {
+                    x += char_width;
+                }
+            }
+            byte_pos += ch.len_utf8();
+        }
+
+        // Current screen column is the current x position
+        let current_screen_col = x;
+
+        // If we're on the very first line (no wrap, no newline), do nothing
+        if current_line_start == 0 {
+            return;
+        }
+
+        // Get the text of the previous line
+        let prev_line_text = if current_line_start > 0 {
+            // Check if there's a newline before current line
+            let before_current = &self.input_buffer[..current_line_start];
+            if before_current.ends_with('\n') {
+                &self.input_buffer[prev_line_start..current_line_start - 1]
+            } else {
+                &self.input_buffer[prev_line_start..current_line_start]
+            }
+        } else {
+            ""
+        };
+
+        // Determine starting x for previous line
+        // If prev_line_start is 0, it's the first line (starts with prompt)
+        // Otherwise, it starts at x=0
+        let prev_line_start_x = if prev_line_start == 0 {
+            prompt_width
+        } else {
+            0
+        };
+
+        // Scan previous line to find the position at target screen column
+        let mut target_x = prev_line_start_x;
+        let mut target_byte_pos = prev_line_start;
+
+        for ch in prev_line_text.chars() {
+            let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+            if target_x + char_width > input_area_width {
+                break; // Stop at wrap point (shouldn't happen in a line segment)
+            }
+            if target_x >= current_screen_col {
+                break; // Reached target column
+            }
+            target_x += char_width;
+            target_byte_pos += ch.len_utf8();
+        }
+
+        self.input_cursor = target_byte_pos;
+    }
+
+    /// Move cursor down one line in multi-line input
+    pub fn move_cursor_down(&mut self, input_area_width: u16) {
+        if input_area_width == 0 {
+            return;
+        }
+
+        let prompt_width = self.prompt_width();
+        let before_cursor = &self.input_buffer[..self.input_cursor];
+        let after_cursor = &self.input_buffer[self.input_cursor..];
+
+        // Find current line start and calculate screen column (x position)
+        let mut x = prompt_width; // First line starts after prompt
+        let mut byte_pos = 0;
+
+        for ch in before_cursor.chars() {
+            if ch == '\n' {
+                x = 0; // Lines after first start at column 0
+            } else {
+                let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+                if x + char_width > input_area_width {
+                    x = char_width;
+                } else {
+                    x += char_width;
+                }
+            }
+            byte_pos += ch.len_utf8();
+        }
+
+        // Current screen column is the current x position
+        let current_screen_col = x;
+
+        // Find the next line start from current cursor position
+        let mut next_line_start = None;
+        let mut next_next_line_start = None;
+        // Continue from current x position
+        byte_pos = self.input_cursor;
+
+        for ch in after_cursor.chars() {
+            if ch == '\n' {
+                if next_line_start.is_none() {
+                    next_line_start = Some(byte_pos + ch.len_utf8());
+                    x = 0;
+                } else {
+                    next_next_line_start = Some(byte_pos + ch.len_utf8());
+                    break;
+                }
+            } else {
+                let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+                if x + char_width > input_area_width {
+                    if next_line_start.is_none() {
+                        next_line_start = Some(byte_pos);
+                        x = char_width;
+                    } else {
+                        next_next_line_start = Some(byte_pos);
+                        break;
+                    }
+                } else {
+                    x += char_width;
+                }
+            }
+            byte_pos += ch.len_utf8();
+        }
+
+        // If there's no next line, do nothing
+        let Some(next_start) = next_line_start else {
+            return;
+        };
+
+        // Find position in next line that matches current screen column
+        let next_line_text = if let Some(next_next) = next_next_line_start {
+            &self.input_buffer[next_start..next_next]
+        } else {
+            &self.input_buffer[next_start..]
+        };
+
+        // Scan next line to find the position at target screen column
+        let mut target_x = 0u16;
+        let mut target_byte_pos = next_start;
+
+        for ch in next_line_text.chars() {
+            if ch == '\n' {
+                break; // Stop at newline
+            }
+            let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+            if target_x + char_width > input_area_width {
+                break; // Stop at wrap point
+            }
+            if target_x >= current_screen_col {
+                break; // Reached target column
+            }
+            target_x += char_width;
+            target_byte_pos += ch.len_utf8();
+        }
+
+        self.input_cursor = target_byte_pos;
+    }
+
     /// Calculate the actual input box height (including border) for a given area height and width.
     pub fn calculate_input_box_height(&self, area_height: u16, area_width: u16) -> u16 {
         let input_text_lines = self.calculate_input_lines(area_width);
@@ -446,12 +675,12 @@ impl TuiAssistant {
         (input_text_lines + 1).clamp(min_input_height, max_input_height)
     }
 
-    /// Get cursor position for rendering with the given input area dimensions.
+    /// Get cursor position for rendering.
     /// Returns Some((x, y)) if cursor should be shown, None otherwise.
     /// Coordinates are relative to the input box inner area.
-    pub fn get_cursor_position(&self, input_area_width: u16) -> Option<(u16, u16)> {
-        let prompt = "> ";
-        let prompt_width = prompt.len() as u16;
+    pub fn get_cursor_position(&self) -> Option<(u16, u16)> {
+        let prompt_width = self.prompt_width();
+        let input_area_width = self.input_area_width();
 
         // Calculate available width for text (excluding prompt)
         let available_width = input_area_width.saturating_sub(prompt_width);
@@ -477,11 +706,19 @@ impl TuiAssistant {
             let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
 
             if x + char_width > input_area_width {
-                // Wrap to next line
-                x = 0;
+                // Wrap to next line before adding this character
+                x = char_width;
                 y += 1;
+            } else {
+                x += char_width;
             }
-            x += char_width;
+        }
+
+        // If cursor is exactly at the right edge, check if we should wrap
+        // Only wrap if there's more content after the cursor (not at the end)
+        if x >= input_area_width && self.input_cursor < self.input_buffer.len() {
+            x = 0;
+            y += 1;
         }
 
         Some((x, y))
@@ -682,21 +919,23 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
         }
     }
 
-    // Calculate scroll offset
-    let total_lines = all_lines.len() as u16;
-    let visible_lines = area.height;
+    // Calculate scroll offset (0 = at bottom, >0 = scrolled up)
+    let total_lines = all_lines.len();
+    let visible_lines = area.height as usize;
+
+    // Clamp scroll_offset to valid range
     let max_scroll = total_lines.saturating_sub(visible_lines);
 
-    // Adjust scroll_offset if it's MAX (scroll to bottom)
-    let effective_scroll = if assistant.scroll_offset == u16::MAX {
-        max_scroll
-    } else {
-        assistant.scroll_offset.min(max_scroll)
-    };
+    // Cache max_scroll for scroll limiting
+    assistant.max_scroll_offset.set(max_scroll);
 
-    // Skip lines based on scroll offset
-    let skip = effective_scroll as usize;
-    let visible: Vec<Line> = all_lines.into_iter().skip(skip).take(visible_lines as usize).collect();
+    let effective_scroll = assistant.scroll_offset.min(max_scroll);
+
+    // Calculate which lines to show
+    // When scroll_offset = 0, we show the last N lines (at bottom)
+    // When scroll_offset = max, we show the first N lines (at top)
+    let skip = total_lines.saturating_sub(visible_lines + effective_scroll);
+    let visible: Vec<Line> = all_lines.into_iter().skip(skip).take(visible_lines).collect();
 
     // Render without wrap since we already handled wrapping manually
     let paragraph = Paragraph::new(visible);
@@ -789,9 +1028,12 @@ fn render_input_box(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
         return;
     }
 
+    // Cache the input area width for cursor movement calculations
+    assistant.last_input_area_width.set(inner.width);
+
     // Render input prompt and text
-    let prompt = "> ";
-    let prompt_width = prompt.len() as u16;
+    let prompt = assistant.prompt();
+    let prompt_width = assistant.prompt_width();
     let input_text = assistant.get_input();
 
     // Build lines with wrapping (no auto-formatting, just hard wrap at width)

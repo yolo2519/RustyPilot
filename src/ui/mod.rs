@@ -74,7 +74,7 @@ impl Widget for &App {
         self.tui_assistant.render(ai_area, buf);
 
         // Render blocks
-        let hint = Line::from(" Ctrl + B: Enter Command Mode ");
+        let hint = " Ctrl + B: Enter Command Mode ";
         let (block_term, block_ai) = match active {
             _ if self.get_command_mode() => (block_term, block_ai),
             ActivePane::Terminal => (block_term.title_bottom(hint.fg(Color::Black).bg(active_termcolor)), block_ai),
@@ -86,7 +86,11 @@ impl Widget for &App {
         block_ai.render(layout.assistant_area, buf);
         // Render separator
         if self.get_command_mode() {
-            render_command_mode_hint(area, buf, cmdmode_color);
+            let extra_hints = match active {
+                ActivePane::Terminal => vec![(" ^B".into(), "Send ^B to shell ".into())],
+                ActivePane::Assistant => vec![],
+            };
+            render_command_mode_hint(area, buf, cmdmode_color, extra_hints);
         }
     }
 }
@@ -129,12 +133,16 @@ fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 /// Render a pop-up with command mode hints
-fn render_command_mode_hint(screen_area: Rect, buf: &mut Buffer, fg_color: Color) {
-    let lines: Vec<(String, String)> = vec![
+fn render_command_mode_hint(screen_area: Rect, buf: &mut Buffer, fg_color: Color, extra_hints: impl IntoIterator<Item = (String, String)>) {
+    let mut lines: Vec<(String, String)> = vec![
         (" N".into(), "Toggle active pane".into()),
         (" C".into(), "Exit program".into()),
-        (" <Any>".into(),"Quit command mode".into()),
+        (" L".into(), "Force redraw (clear screen)".into()),
+        (" <Any>".into(),"Quit command mode".into())
     ];
+
+    lines.extend(extra_hints);
+
     let max_key_width = lines.iter().map(|(a, _)| a.width()).max().unwrap_or(0);
     let max_value_width = lines.iter().map(|(_, b)| b.width()).max().unwrap_or(0);
     let lines: Vec<Line<'_>> = lines.into_iter().map(|(mut k, v)| {
