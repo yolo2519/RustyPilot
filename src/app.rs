@@ -44,6 +44,7 @@ pub struct App {
 
     exit: bool,  // Should the app exit?
     command_mode: bool,  // Is the app in the command mode?
+    force_redraw_flag: bool,  // Should force a full screen clear and redraw?
 
     // Layout builder - holds user preferences/constraints for layout
     layout_builder: LayoutBuilder,
@@ -90,6 +91,7 @@ impl App {
             context_manager: ContextManager::new(),
             exit: false,
             command_mode: false,
+            force_redraw_flag: false,
             layout_builder,
             layout: initial_layout,
             user_events: init_user_event(),
@@ -195,7 +197,13 @@ impl App {
                     // PTY output is handled internally by TuiTerminal
                 }
             }
-            self.draw(terminal)?;
+            // Check if force redraw is needed (e.g., after stderr pollution)
+            if self.force_redraw_flag {
+                self.force_redraw_flag = false;
+                self.force_redraw(terminal)?;
+            } else {
+                self.draw(terminal)?;
+            }
         }
     }
 
@@ -217,6 +225,15 @@ impl App {
         // Set cursor based on current layout
         self.update_cursor_position(terminal)?;
 
+        Ok(())
+    }
+
+    /// Force a full screen clear and redraw.
+    /// This is useful when stderr output has polluted the screen.
+    pub fn force_redraw(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        // eprintln!("force_redraw");
+        terminal.clear()?;
+        self.draw(terminal)?;
         Ok(())
     }
 
@@ -267,14 +284,12 @@ impl App {
                 // Calculate the input box area
                 let input_box_y = ai_area.y + ai_area.height.saturating_sub(input_box_height);
                 let input_box_x = ai_area.x;
-                let input_box_width = ai_area.width;
 
                 // The input box has a top border, so the inner area is:
                 let inner_y = input_box_y + 1;
-                let inner_width = input_box_width;
 
                 // Get cursor position from assistant
-                if let Some((rel_x, rel_y)) = self.tui_assistant.get_cursor_position(inner_width) {
+                if let Some((rel_x, rel_y)) = self.tui_assistant.get_cursor_position() {
                     terminal.show_cursor()?;
                     terminal.set_cursor_position((input_box_x + rel_x, inner_y + rel_y))?;
                 } else {
@@ -298,7 +313,7 @@ impl App {
         match event {
             UserEvent::Key(key_evt) if matches!(key_evt.kind, KeyEventKind::Press) => {
                 // Ctrl + B => Command Mode
-                if key_evt.modifiers.contains(KeyModifiers::CONTROL) && matches!(key_evt.code, KeyCode::Char('b')) {
+                if key_evt.modifiers.contains(KeyModifiers::CONTROL) && matches!(key_evt.code, KeyCode::Char('b') | KeyCode::Char('B')) {
                     self.set_command_mode(true);
                     return Ok(());
                 }
@@ -329,17 +344,27 @@ impl App {
 
         match event {
             // mock event: n => toggle pane
-            UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('n')) => {
+            UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('n') | KeyCode::Char('N')) => {
                 self.toggle_pane();
             }
             // mock event: c => exit
-            UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('c')) => {
+            UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('c') | KeyCode::Char('C')) => {
                 self.exit = true;
             }
-            _ => {
-                return Ok(());
-                // don't allow other ignored events to exit command mode
-            },
+            // L => force redraw (refresh all, clear stderr pollution)
+            UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('l') | KeyCode::Char('L')) => {
+                // Set flag to trigger a full screen clear and redraw
+                self.force_redraw_flag = true;
+            }
+            UserEvent::Key(e) if
+                matches!(e.kind, KeyEventKind::Press)
+             && matches!(e.modifiers, KeyModifiers::CONTROL)
+             && matches!(e.code, KeyCode::Char('b') | KeyCode::Char('B'))
+             && self.active_pane == ActivePane::Terminal => {
+                // forward keyboard event to shell
+                crate::event::terminal::handle_key_event(&mut self.tui_terminal, &mut self.shell_manager, e)?;
+            }
+            _ => {},
         }
         self.set_command_mode(false);
         Ok(())
