@@ -151,10 +151,12 @@ impl AiSessionManager {
         let session = match self.sessions.get_mut(&session_id) {
             Some(s) => s,
             None => {
-                let _ = self.ai_stream_tx.try_send(AiStreamData::Error {
+                if let Err(e) = self.ai_stream_tx.try_send(AiStreamData::Error {
                     session_id,
                     error: "Session not found".to_string(),
-                });
+                }) {
+                    error!("Failed to send error event: {:?}", e);
+                }
                 return;
             }
         };
@@ -169,10 +171,12 @@ impl AiSessionManager {
         {
             Ok(msg) => msg.into(),
             Err(e) => {
-                let _ = self.ai_stream_tx.try_send(AiStreamData::Error {
+                if let Err(e) = self.ai_stream_tx.try_send(AiStreamData::Error {
                     session_id,
                     error: format!("Failed to build message: {}", e),
-                });
+                }) {
+                    error!("Failed to send error event: {:?}", e);
+                }
                 return;
             }
         };
@@ -189,10 +193,12 @@ impl AiSessionManager {
         {
             Ok(req) => req,
             Err(e) => {
-                let _ = self.ai_stream_tx.try_send(AiStreamData::Error {
+                if let Err(e) = self.ai_stream_tx.try_send(AiStreamData::Error {
                     session_id,
                     error: format!("Failed to build request: {}", e),
-                });
+                }) {
+                    error!("Failed to send error event: {:?}", e);
+                }
                 return;
             }
         };
@@ -212,37 +218,46 @@ impl AiSessionManager {
                                 for choice in response.choices {
                                     if let Some(content) = choice.delta.content {
                                         // Send chunk to UI
-                                        let _ = stream_tx
+                                        if let Err(e) = stream_tx
                                             .send(AiStreamData::Chunk {
                                                 session_id,
                                                 text: content,
-                                            })
-                                            .await;
+                                            }).await
+                                        {
+                                            error!("Failed to send chunk event: {:?}", e);
+                                        }
                                     }
                                 }
                             }
                             Err(e) => {
-                                let _ = stream_tx
+                                if let Err(e) = stream_tx
                                     .send(AiStreamData::Error {
                                         session_id,
                                         error: format!("Stream error: {}", e),
-                                    })
-                                    .await;
+                                    }).await
+                                {
+                                    error!("Failed to send error event: {:?}", e);
+                                }
                                 return;
                             }
                         }
                     }
 
                     // Stream completed successfully
-                    let _ = stream_tx.send(AiStreamData::End { session_id }).await;
+                    if let Err(e) = stream_tx.send(AiStreamData::End { session_id }).await {
+                        error!("Failed to send end event: {:?}", e);
+                    }
                 }
                 Err(e) => {
-                    let _ = stream_tx
+                    if let Err(e) = stream_tx
                         .send(AiStreamData::Error {
                             session_id,
                             error: format!("API error: {}", e),
                         })
-                        .await;
+                        .await
+                    {
+                        error!("Failed to send error event: {:?}", e);
+                    }
                 }
             }
         });
@@ -264,11 +279,13 @@ impl AiSessionManager {
             if let Some(suggestion) = parser::parse_command_suggestion(&response) {
                 session.last_suggestion = Some(suggestion.clone());
                 // Emit suggestion event so UI can render a card
-                let _ = self.app_event_tx.send(AppEvent::AiCommandSuggestion {
+                if let Err(e) = self.app_event_tx.send(AppEvent::AiCommandSuggestion {
                     session_id,
                     command: suggestion.suggested_command,
                     explanation: suggestion.natural_language_explanation,
-                });
+                }) {
+                    error!("Failed to send app event: {:?}", e);
+                }
             }
 
             // Clear current response buffer
