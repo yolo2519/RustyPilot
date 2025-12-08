@@ -109,15 +109,25 @@ impl TuiAssistant {
 
     /// Await on the AI stream and process incoming data.
     /// Call this in a tokio::select! branch.
-    pub async fn recv_ai_stream(&mut self) -> Option<()> {
+    pub async fn recv_ai_stream(
+        &mut self,
+        ai_sessions: &mut crate::ai::session::AiSessionManager,
+    ) -> Option<()> {
         let data = self.ai_stream.recv().await?;
         match data {
             AiStreamData::Chunk { session_id, text } => {
+                ai_sessions.append_chunk(session_id, &text);
                 if session_id == self.active_session {
                     self.append_stream_chunk(&text);
                 }
             }
             AiStreamData::End { session_id } => {
+                if let Some(current) = ai_sessions
+                    .get_current_response(session_id)
+                    .map(|s| s.to_string())
+                {
+                    ai_sessions.finalize_response(session_id, current);
+                }
                 if session_id == self.active_session {
                     self.end_stream();
                 }
