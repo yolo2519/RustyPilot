@@ -11,28 +11,30 @@
 //! ```no_run
 //! use rusty_term::ai::AiSessionManager;
 //! use rusty_term::context::ContextSnapshot;
-//! use rusty_term::event::{init_app_eventsource, AiStreamData};
-//! use tokio::sync::mpsc;
+//! use rusty_term::event::{init_app_eventsource, AiUiUpdate};
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let (ai_stream_tx, mut ai_stream_rx) = mpsc::channel(100);
 //!     let (app_event_tx, mut app_event_rx) = init_app_eventsource();
-//!     
+//!
+//!     // AiSessionManager now owns its own stream channel internally
 //!     let mut manager = AiSessionManager::new(
-//!         ai_stream_tx,
 //!         app_event_tx,
 //!         "gpt-4o-mini"
-//!     );
-//!     
+//!     ).unwrap();
+//!
 //!     let context = ContextSnapshot {
 //!         cwd: "/home/user".to_string(),
 //!         env_vars: vec![],
 //!         recent_history: vec![],
+//!         recent_output: vec![],
 //!     };
-//!     
+//!
 //!     let session_id = manager.current_session_id();
 //!     manager.send_message(session_id, "list all files", context);
+//!
+//!     // Use recv_ai_stream() to receive and process AI responses
+//!     // The manager stores data internally and returns AiUiUpdate for display
 //! }
 //! ```
 
@@ -49,5 +51,4 @@ pub mod utils;
 pub use ai::{AiClient, AiSessionManager};
 pub use app::{ActivePane, App};
 pub use context::{ContextManager, ContextSnapshot};
-pub use event::{init_app_eventsource, init_user_event, AiStreamData, AppEvent, UserEvent};
-
+pub use event::{init_app_eventsource, init_user_event, AiStreamData, AiUiUpdate, AppEvent, UserEvent};

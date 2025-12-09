@@ -14,10 +14,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 use std::cell::Cell;
-use tokio::sync::mpsc::Receiver;
 
 use crate::ai::session::SessionId;
-use crate::event::AiStreamData;
+use crate::event::AiUiUpdate;
 
 // ============================================================================
 // Data Structures
@@ -64,11 +63,11 @@ pub struct SessionTab {
 // TuiAssistant Widget
 // ============================================================================
 
-/// The main AI Assistant sidebar widget
+/// The main AI Assistant sidebar widget.
+///
+/// This is a pure UI component that receives updates from AiSessionManager
+/// through the App layer. It does not own any data channels.
 pub struct TuiAssistant {
-    // AI stream receiver (dedicated channel for high-frequency streaming data)
-    ai_stream: Receiver<AiStreamData>,
-
     // Session management
     session_tabs: Vec<SessionTab>,
     active_session: SessionId,
@@ -118,13 +117,12 @@ impl TuiAssistant {
 }
 
 impl TuiAssistant {
-    pub fn new(ai_stream: Receiver<AiStreamData>) -> Self {
+    pub fn new() -> Self {
         let initial_session = SessionTab {
             id: 1,
             name: "Session 1".to_string(),
         };
         Self {
-            ai_stream,
             session_tabs: vec![initial_session],
             active_session: 1,
             messages: Vec::new(),
@@ -143,43 +141,49 @@ impl TuiAssistant {
         self.last_input_area_width.get()
     }
 
-    /// Await on the AI stream and process incoming data.
-    /// Call this in a tokio::select! branch.
-    pub async fn recv_ai_stream(
-        &mut self,
-        ai_sessions: &mut crate::ai::session::AiSessionManager,
-    ) -> Option<()> {
-        let data = self.ai_stream.recv().await?;
-        match data {
-            AiStreamData::Chunk { session_id, text } => {
-                ai_sessions.append_chunk(session_id, &text);
+    /// Handle AI updates forwarded from AiSessionManager via App.
+    ///
+    /// This is the main entry point for AI data updates. The App layer
+    /// receives updates from AiSessionManager and forwards them here.
+    pub fn handle_ai_update(&mut self, update: AiUiUpdate) {
+        match update {
+            AiUiUpdate::Chunk { session_id, text } => {
                 if session_id == self.active_session {
                     self.append_stream_chunk(&text);
                 }
             }
-            AiStreamData::End { session_id } => {
-                if let Some(current) = ai_sessions
-                    .get_current_response(session_id)
-                    .map(|s| s.to_string())
-                {
-                    ai_sessions.finalize_response(session_id, current);
-                }
+            AiUiUpdate::End { session_id } => {
                 if session_id == self.active_session {
                     self.end_stream();
                 }
             }
-            AiStreamData::Error { session_id, error } => {
+            AiUiUpdate::Error { session_id, error } => {
                 if session_id == self.active_session {
                     self.end_stream();
                     self.push_user_message(format!("[Error] {}", error));
                 }
             }
+            AiUiUpdate::CommandSuggestion {
+                session_id,
+                command,
+                explanation,
+            } => {
+                if session_id == self.active_session {
+                    // End the streaming message first
+                    self.end_stream();
+                    // Then add the command card
+                    self.push_command_card(command, explanation);
+                }
+            }
         }
-        Some(())
     }
 }
 
-// Note: No Default impl because TuiAssistant requires an ai_stream receiver
+impl Default for TuiAssistant {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TuiAssistant {
     // ========================================================================

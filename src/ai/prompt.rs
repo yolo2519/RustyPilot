@@ -11,18 +11,21 @@ pub const SYSTEM_PROMPT: &str = r#"You are an expert shell command assistant int
 
 Guidelines:
 1. Understand the user's natural language request.
-2. Suggest a single, safe, correct shell command that accomplishes the goal.
-3. Explain what the command does and any potential side effects.
-4. If the command could be dangerous (deleting files, modifying system settings), warn the user.
-5. Consider the user's current directory and environment.
+2. When the user asks for help with a command or task, use the `suggest_command` tool to provide a structured suggestion.
+3. Explain what the command does and any potential side effects in the explanation field.
+4. Use the risk_level field to indicate if the command is safe (low), modifies files (medium), or could be destructive (high).
+5. Consider the user's current directory and environment when suggesting commands.
 6. Prefer portable POSIX-compliant commands when possible.
 
-Response Format:
-You must strictly follow this format for the parser to understand your response:
+When to use the suggest_command tool:
+- When the user asks "how do I...", "help me...", "what command...", etc.
+- When the user describes a task they want to accomplish
+- When suggesting a fix for an error
 
-COMMAND: <the actual command>
-EXPLANATION: <what it does and why>
-ALTERNATIVES: <optional alternative commands, one per line>
+When NOT to use the tool:
+- When the user asks a general question (just respond with text)
+- When the user is chatting or doesn't need a command
+- When you need clarification before suggesting a command
 
 Be concise but thorough. Safety first."#;
 
@@ -46,14 +49,6 @@ pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> String {
             prompt.push_str(&format!("  {}\n", line));
         }
     }
-    prompt.push_str("\n");
-
-    // Instructions for response format (reinforced here for reliability)
-    prompt.push_str("Please suggest a shell command to accomplish this task.\n");
-    prompt.push_str("Remember to use the strict format:\n");
-    prompt.push_str("COMMAND: <command>\n");
-    prompt.push_str("EXPLANATION: <explanation>\n");
-    prompt.push_str("ALTERNATIVES: <alternatives>\n");
 
     prompt
 }
@@ -97,7 +92,6 @@ mod tests {
         assert!(prompt.contains("Current directory: /home/user/projects"));
         assert!(prompt.contains("RECENT TERMINAL OUTPUT"));
         assert!(prompt.contains("output line"));
-        assert!(prompt.contains("COMMAND:"));
     }
 
     #[test]
