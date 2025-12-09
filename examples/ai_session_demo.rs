@@ -1,11 +1,11 @@
-//! Demonstration of the AI Session Manager
+//! Demonstration of the AI Session Manager with Tool Calling
 //!
 //! This example shows how to use the AI Session Manager to:
 //! - Create and manage multiple chat sessions
 //! - Send messages with system context
-//! - Receive streaming responses
-//! - Parse command suggestions
-//! - Execute suggested commands
+//! - Receive streaming responses via recv_ai_stream()
+//! - Handle structured command suggestions via OpenAI Tool Calling
+//! - Accept or reject suggested commands (responses added to conversation history)
 //!
 //! Run with: cargo run --example ai_session_demo
 //!
@@ -16,8 +16,7 @@ use std::io::{self, Write};
 use anyhow::Result;
 use rusty_term::ai::AiSessionManager;
 use rusty_term::context::ContextSnapshot;
-use rusty_term::event::{init_app_eventsource, AiStreamData, AppEvent};
-use tokio::sync::mpsc;
+use rusty_term::event::{init_app_eventsource, AiUiUpdate, AppEvent};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,13 +31,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Create channels for communication
-    let (ai_stream_tx, mut ai_stream_rx) = mpsc::channel::<AiStreamData>(100);
+    // Create app event channel
     let (app_event_tx, mut app_event_rx) = init_app_eventsource();
 
-    // Create AI Session Manager
+    // Create AI Session Manager (now owns its own stream channel internally)
     let mut session_manager = AiSessionManager::new(
-        ai_stream_tx,
         app_event_tx,
         "gpt-4o-mini", // Use a real model name
     )?;
@@ -110,33 +107,39 @@ async fn main() -> Result<()> {
         let session_id = session_manager.current_session_id();
         session_manager.send_message(session_id, input, context.clone());
 
-        // Process streaming response
+        // Process streaming response using recv_ai_stream()
         println!("AI Response: ");
         print!("  ");
         io::stdout().flush()?;
 
-        let mut full_response = String::new();
         let mut stream_ended = false;
 
         // Process stream and events
         while !stream_ended {
             tokio::select! {
-                // Handle AI stream data
-                Some(stream_data) = ai_stream_rx.recv() => {
-                    match stream_data {
-                        AiStreamData::Chunk { text, .. } => {
+                // Handle AI stream data via recv_ai_stream()
+                // This is the new pattern: AiSessionManager owns the stream and
+                // stores data internally, then returns AiUiUpdate for display
+                Some(update) = session_manager.recv_ai_stream() => {
+                    match update {
+                        AiUiUpdate::Chunk { text, .. } => {
                             print!("{}", text);
                             io::stdout().flush()?;
-                            full_response.push_str(&text);
-                            session_manager.append_chunk(session_id, &text);
                         }
-                        AiStreamData::End { .. } => {
+                        AiUiUpdate::End { .. } => {
                             println!("\n");
-                            session_manager.finalize_response(session_id, full_response.clone());
                             stream_ended = true;
                         }
-                        AiStreamData::Error { error, .. } => {
+                        AiUiUpdate::Error { error, .. } => {
                             println!("\n✗ Error: {}\n", error);
+                            stream_ended = true;
+                        }
+                        AiUiUpdate::CommandSuggestion { command, explanation, .. } => {
+                            println!("\n");
+                            println!("--- Command Suggestion ---");
+                            println!("  Command: {}", command);
+                            println!("  Explanation: {}", explanation);
+                            println!();
                             stream_ended = true;
                         }
                     }
@@ -145,19 +148,11 @@ async fn main() -> Result<()> {
                 // Handle app events
                 Some(app_event) = app_event_rx.recv() => {
                     match app_event {
-                        AppEvent::AiCommandSuggestion { command, explanation, .. } => {
-                            println!("--- Command Suggestion ---");
-                            println!("  Command: {}", command);
-                            println!("  Explanation: {}", explanation);
+                        AppEvent::ExecuteAiCommand { command, .. } => {
+                            println!("--- Executing Command ---");
+                            println!("  {}", command);
+                            println!("  (In a real app, this would execute the command)");
                             println!();
-                        }
-                        AppEvent::ExecuteAiCommand { session_id } => {
-                            if let Some(suggestion) = session_manager.get_last_suggestion(session_id) {
-                                println!("--- Executing Command ---");
-                                println!("  {}", suggestion.suggested_command);
-                                println!("  (In a real app, this would execute the command)");
-                                println!();
-                            }
                         }
                         _ => {}
                     }
@@ -171,16 +166,30 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Show suggestion if available
-        if let Some(suggestion) = session_manager.get_last_suggestion(session_id) {
-            println!("--- Last Suggestion ---");
-            println!("  Command: {}", suggestion.suggested_command);
-            println!("  Explanation: {}", suggestion.natural_language_explanation);
-            if !suggestion.alternatives.is_empty() {
-                println!("  Alternatives:");
-                for alt in &suggestion.alternatives {
-                    println!("    - {}", alt);
+        // Show suggestion if available (from the session manager)
+        if let Some(suggestion) = session_manager.get_pending_suggestion(session_id) {
+            println!("--- Pending Suggestion ---");
+            println!("  Command: {}", suggestion.command);
+            println!("  Explanation: {}", suggestion.explanation);
+            println!("  Status: {:?}", suggestion.status);
+            println!();
+
+            // Demo: Ask user to accept or reject
+            print!("Accept this suggestion? (y/n): ");
+            io::stdout().flush()?;
+            let mut response = String::new();
+            io::stdin().read_line(&mut response)?;
+            let response = response.trim().to_lowercase();
+
+            if response == "y" || response == "yes" {
+                if let Some(cmd) = session_manager.accept_suggestion(session_id) {
+                    println!("✓ Accepted command: {}", cmd);
+                    // In real app, would execute the command here
+                    session_manager.execute_suggestion(session_id, cmd)?;
                 }
+            } else {
+                session_manager.reject_suggestion(session_id);
+                println!("✗ Rejected suggestion");
             }
             println!();
         }

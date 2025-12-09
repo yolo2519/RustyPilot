@@ -13,32 +13,43 @@ use crate::ui::assistant::TuiAssistant;
 ///
 /// # Arguments
 /// * `assistant` - The assistant UI widget
-/// * `ai_sessions` - The AI session manager
+/// * `ai_sessions` - The AI session manager (authoritative source for command suggestions)
 /// * `key_evt` - The key event to handle
-/// * `context` - Current shell context for AI requests
+/// * `context_manager` - Current shell context for AI requests
 pub fn handle_key_event(
     assistant: &mut TuiAssistant,
     ai_sessions: &mut AiSessionManager,
     context_manager: &crate::context::ContextManager,
     key_evt: KeyEvent,
 ) -> Result<()> {
+    let session_id = assistant.active_session_id();
+
     // Check for pending command confirmation first (Ctrl+Y / Ctrl+N shortcuts)
-    if assistant.has_pending_command() {
+    // Use ai_sessions as the authoritative source for pending suggestions
+    if ai_sessions.has_pending_suggestion(session_id) {
         match key_evt.code {
             KeyCode::Char('y') | KeyCode::Char('Y')
-                if key_evt.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Update UI to show command as executed
-                assistant.confirm_command();
+                if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                // Update backend state first (marks suggestion as Accepted)
+                // accept_suggestion returns the command string
+                if let Some(command) = ai_sessions.accept_suggestion(session_id) {
+                    // Update UI to show command as executed
+                    assistant.confirm_command();
 
-                // Tell the session manager to execute the suggested command
-                // It will send the ExecuteAiCommand event to the app layer
-                let session_id = assistant.active_session_id();
-                ai_sessions.execute_suggestion(session_id)?;
+                    // Tell the session manager to execute the suggested command
+                    // It will send the ExecuteAiCommand event to the app layer
+                    ai_sessions.execute_suggestion(session_id, command)?;
+                }
 
                 return Ok(());
             }
             KeyCode::Char('n') | KeyCode::Char('N')
-                if key_evt.modifiers.contains(KeyModifiers::CONTROL) => {
+                if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                // Update backend state first (marks suggestion as Rejected)
+                ai_sessions.reject_suggestion(session_id);
+                // Update UI
                 assistant.reject_command();
                 return Ok(());
             }
@@ -63,11 +74,11 @@ pub fn handle_key_event(
             let input = assistant.take_input();
             if !input.trim().is_empty() {
                 // If there's a pending command, auto-reject it before sending new message
-                if assistant.has_pending_command() {
+                if ai_sessions.has_pending_suggestion(session_id) {
+                    ai_sessions.reject_suggestion(session_id);
                     assistant.reject_command();
                 }
 
-                let session_id = assistant.active_session_id();
                 assistant.push_user_message(input.clone());
                 assistant.start_assistant_message();
                 // Send to AI backend - response will come through ai_stream channel

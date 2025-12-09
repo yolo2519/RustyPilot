@@ -70,11 +70,46 @@ use crate::ai::session::SessionId;
 ///
 /// This is separate from AppEvent because:
 /// 1. Streaming chunks are high-frequency and should not flood the global event queue
-/// 2. TuiAssistant is the only consumer of stream data
-/// 3. End-of-stream must be in the same channel to preserve ordering with chunks
+/// 2. End-of-stream must be in the same channel to preserve ordering with chunks
+///
+/// This channel is owned by AiSessionManager which processes the data and
+/// forwards UI updates to TuiAssistant.
 #[derive(Debug, Clone)]
 pub enum AiStreamData {
     /// A chunk of text from the streaming response
+    Chunk {
+        session_id: SessionId,
+        text: String,
+    },
+    /// Tool calls from the AI (accumulated from streaming chunks)
+    /// Each tuple is (tool_call_id, function_name, arguments_json)
+    ToolCalls {
+        session_id: SessionId,
+        tool_calls: Vec<(String, String, String)>,
+    },
+    /// The streaming response has completed
+    End {
+        session_id: SessionId,
+    },
+    /// An error occurred during streaming
+    Error {
+        session_id: SessionId,
+        error: String,
+    },
+}
+
+// =============================================================================
+// AI UI Update (AiSessionManager -> TuiAssistant)
+// =============================================================================
+
+/// UI update events sent from AiSessionManager to TuiAssistant.
+///
+/// After AiSessionManager receives and stores streaming data, it returns
+/// these updates to the App layer, which forwards them to TuiAssistant for display.
+/// This keeps AiSessionManager as the single source of truth for conversation data.
+#[derive(Debug, Clone)]
+pub enum AiUiUpdate {
+    /// A chunk of text to append to the streaming message
     Chunk {
         session_id: SessionId,
         text: String,
@@ -87,6 +122,12 @@ pub enum AiStreamData {
     Error {
         session_id: SessionId,
         error: String,
+    },
+    /// AI suggested a command that should be displayed as a card
+    CommandSuggestion {
+        session_id: SessionId,
+        command: String,
+        explanation: String,
     },
 }
 
@@ -116,16 +157,10 @@ pub enum AppEvent {
     // AI Events (Low-frequency, requires App-level handling)
     // =========================================================================
 
-    /// AI has suggested a command that needs user confirmation.
-    AiCommandSuggestion {
-        session_id: SessionId,
-        command: String,
-        explanation: String,
-    },
-
     /// User has confirmed execution of the AI-suggested command.
     ExecuteAiCommand {
         session_id: SessionId,
+        command: String,
     },
 
     // =========================================================================

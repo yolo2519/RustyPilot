@@ -5,7 +5,7 @@
 //! It provides methods for pane switching and state initialization.
 
 
-use crate::event::{AiStreamData, AppEvent, init_app_eventsource, init_user_event};
+use crate::event::{AppEvent, init_app_eventsource, init_user_event};
 use crate::event::{assistant as assistant_event, terminal as terminal_event, UserEvent};
 use crate::ai::session::AiSessionManager;
 use crate::context::ContextManager;
@@ -17,7 +17,7 @@ use crate::ui::layout::{AppLayout, LayoutBuilder};
 
 use anyhow::{Context, Result};
 use ratatui::DefaultTerminal;
-use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver};
+use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
@@ -67,9 +67,6 @@ impl App {
 
         let (shell, pty_rx) = ShellManager::new(event_sink.clone(), cols, rows)?;
 
-        // Create dedicated channel for AI streaming (high-frequency data)
-        let (ai_stream_tx, ai_stream_rx) = mpsc::channel::<AiStreamData>(256);
-
         // Create layout builder with default preferences
         let layout_builder = LayoutBuilder::new();
 
@@ -84,9 +81,10 @@ impl App {
 
         Ok(Self {
             shell_manager: shell,
-            ai_sessions: AiSessionManager::new(ai_stream_tx, event_sink.clone(), "gpt-4o-mini")?,
+            // AiSessionManager now owns its own stream channel internally
+            ai_sessions: AiSessionManager::new(event_sink.clone(), "gpt-4o-mini")?,
             tui_terminal: TuiTerminal::new(pty_rx, event_sink.clone()),
-            tui_assistant: TuiAssistant::new(ai_stream_rx),
+            tui_assistant: TuiAssistant::new(),
             active_pane: ActivePane::Terminal,
             context_manager: ContextManager::new(),
             exit: false,
@@ -190,8 +188,12 @@ impl App {
                     let app_evt = res.with_context(|| anyhow::anyhow!("App event stream is ended"))?;
                     self.handle_app_event(app_evt)?;
                 }
-                _ = self.tui_assistant.recv_ai_stream(&mut self.ai_sessions) => {
-                    // AI stream data is handled internally by TuiAssistant
+                // AiSessionManager receives stream data, stores it, and returns UI updates
+                update = self.ai_sessions.recv_ai_stream() => {
+                    if let Some(update) = update {
+                        // Forward UI update to TuiAssistant for display
+                        self.tui_assistant.handle_ai_update(update);
+                    }
                 }
                 _ = self.tui_terminal.recv_pty_output() => {
                     // PTY output is handled internally by TuiTerminal
@@ -377,24 +379,11 @@ impl App {
             AppEvent::PtyWrite(s) => {
                 self.shell_manager.handle_user_input(&s)?;
             }
-            // AI Events
-            AppEvent::AiCommandSuggestion {
-                session_id,
-                command,
-                explanation,
-            } => {
-                if session_id == self.tui_assistant.active_session_id() {
-                    self.tui_assistant.push_command_card(command, explanation);
-                }
-            }
 
-            AppEvent::ExecuteAiCommand { session_id } => {
-                // Retrieve the command from the AI session
-                if let Some(suggestion) = self.ai_sessions.get_last_suggestion(session_id) {
-                    let command = suggestion.suggested_command.clone();
-                    // Inject the command into the shell
-                    self.shell_manager.inject_command(&command)?;
-                }
+            // AI Events
+            AppEvent::ExecuteAiCommand { command, .. } => {
+                // Inject the command into the shell
+                self.shell_manager.inject_command(&command)?;
             }
 
             // Shell Events
