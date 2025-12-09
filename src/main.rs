@@ -13,6 +13,9 @@ use crate::utils::context::Context;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize logging before anything else
+    utils::logger::init_logging();
+
     let mut terminal = ratatui::init();
     let _ctx = Context::with(ratatui::restore);
     let mut app = App::new()?;

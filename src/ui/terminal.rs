@@ -15,6 +15,7 @@ use ratatui::{
     widgets::Widget,
 };
 use tokio::sync::mpsc::{Receiver, UnboundedSender};
+use tracing::error;
 
 use crate::event::AppEvent;
 
@@ -82,10 +83,9 @@ impl EventListener for TerminalEventListener {
         match event {
             Event::PtyWrite(s) => {
                 if let Err(e) = self.app_event_sink.send(AppEvent::PtyWrite(s.into_bytes())) {
-                    eprintln!("Failed to send PtyWrite event: {}", e);
-                    // TODO: this is not pretty, but we don't have anything else to handle the error
-                    // We should later have a global logger for this kind of issue.
-                    // the Err variant is very unlikely to be yielded.
+                    error!("Failed to send PtyWrite event: {:?}", e);
+                    // Note: This error is very unlikely to occur as it would mean
+                    // the event receiver has been dropped while the terminal is still active.
                 }
             }
             _ => {}
@@ -138,24 +138,15 @@ impl TuiTerminal {
             if !trimmed.is_empty() {
                 // Limit to avoid flooding the event channel
                 let truncated: String = trimmed.chars().take(400).collect();
-                let _ = self
+                if let Err(e) = self
                     .event_sink
-                    .send(AppEvent::ShellOutput { data: truncated });
+                    .send(AppEvent::ShellOutput { data: truncated })
+                {
+                    error!("Failed to send shell output event: {:?}", e);
+                }
             }
-            self.process(&bytes);
         }
     }
-
-    /// Process VT100 output data.
-    fn process(&mut self, data: &[u8]) {
-        self.processor.advance(&mut self.term, data);
-
-        // Auto-scroll to bottom when new data arrives ONLY if not scrolled
-        if self.scroll_offset == 0 {
-            self.scroll_to_bottom();
-        }
-    }
-
     /// Scroll up by n lines (into history).
     pub fn scroll_up(&mut self, n: usize) {
         let grid = self.term.grid();
