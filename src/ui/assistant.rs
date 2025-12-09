@@ -50,6 +50,8 @@ pub enum ChatMessage {
         explanation: String,
         status: CommandStatus,
     },
+    /// An error message from the system
+    Error { text: String },
 }
 
 /// A session tab displayed in the tab bar
@@ -67,12 +69,15 @@ pub struct SessionTab {
 ///
 /// This is a pure UI component that receives updates from AiSessionManager
 /// through the App layer. It does not own any data channels.
+///
+/// Session state is synchronized from the backend (AiSessionManager).
+/// The frontend only maintains UI state and caches for rendering.
 pub struct TuiAssistant {
-    // Session management
+    // Session management (synced from backend)
     session_tabs: Vec<SessionTab>,
     active_session: SessionId,
 
-    // Current session's messages (UI rendering format)
+    // Current session's messages (UI rendering format, cached from backend)
     messages: Vec<ChatMessage>,
 
     // Input state
@@ -84,9 +89,6 @@ pub struct TuiAssistant {
 
     // Pending command (index into messages vec)
     pending_command_idx: Option<usize>,
-
-    // ID counter for new sessions
-    next_session_id: SessionId,
 
     // Cached rendering dimensions (updated during render, uses Cell for interior mutability)
     last_input_area_width: Cell<u16>,
@@ -118,6 +120,7 @@ impl TuiAssistant {
 
 impl TuiAssistant {
     pub fn new() -> Self {
+        // Initial session tab - will be overwritten by sync_session_tabs()
         let initial_session = SessionTab {
             id: 1,
             name: "Session 1".to_string(),
@@ -130,7 +133,6 @@ impl TuiAssistant {
             input_cursor: 0,
             scroll_offset: 0,
             pending_command_idx: None,
-            next_session_id: 2,
             last_input_area_width: Cell::new(80), // Default value
             max_scroll_offset: Cell::new(0),
         }
@@ -160,7 +162,7 @@ impl TuiAssistant {
             AiUiUpdate::Error { session_id, error } => {
                 if session_id == self.active_session {
                     self.end_stream();
-                    self.push_user_message(format!("[Error] {}", error));
+                    self.push_error_message(error);
                 }
             }
             AiUiUpdate::CommandSuggestion {
@@ -187,31 +189,41 @@ impl Default for TuiAssistant {
 
 impl TuiAssistant {
     // ========================================================================
-    // Session Management
+    // Session Management (synced from backend)
     // ========================================================================
 
-    /// Switch to a different session by ID
-    pub fn switch_session(&mut self, id: SessionId) {
-        if self.session_tabs.iter().any(|t| t.id == id) {
-            // Only clear messages if actually switching to a different session
-            if self.active_session != id {
-                self.active_session = id;
-                // TODO: Load messages for this session from backend
-                // For now, clear messages when switching (backend integration pending)
-                self.messages.clear();
-                self.scroll_offset = 0;
-                self.pending_command_idx = None;
-            }
-        }
+    /// Sync session tabs from backend.
+    ///
+    /// This should be called by the App layer to update the UI with the current
+    /// list of sessions from AiSessionManager.
+    pub fn sync_session_tabs(&mut self, tabs: Vec<SessionTab>) {
+        self.session_tabs = tabs;
     }
 
-    /// Add a new session and switch to it
-    pub fn add_session(&mut self, name: String) -> SessionId {
-        let id = self.next_session_id;
-        self.next_session_id += 1;
-        self.session_tabs.push(SessionTab { id, name });
-        self.switch_session(id);
-        id
+    /// Load messages for the current session from backend.
+    ///
+    /// This should be called after switching sessions to populate the message list.
+    pub fn load_messages(&mut self, messages: Vec<ChatMessage>) {
+        self.messages = messages;
+        self.scroll_offset = 0;
+        // Find pending command card index if any
+        self.pending_command_idx = self.messages.iter().position(|m| {
+            matches!(m, ChatMessage::CommandCard { status: CommandStatus::Pending, .. })
+        });
+    }
+
+    /// Switch to a different session by ID.
+    ///
+    /// This only updates the active session ID. The caller should also call
+    /// `load_messages()` with the messages from the backend.
+    pub fn switch_session(&mut self, id: SessionId) {
+        if self.active_session != id {
+            self.active_session = id;
+            // Clear messages - they should be loaded by load_messages()
+            self.messages.clear();
+            self.scroll_offset = 0;
+            self.pending_command_idx = None;
+        }
     }
 
     /// Get the current active session ID
@@ -224,26 +236,6 @@ impl TuiAssistant {
         &self.session_tabs
     }
 
-    /// Switch to the next session (cycles through tabs)
-    pub fn next_session(&mut self) {
-        if let Some(idx) = self.session_tabs.iter().position(|t| t.id == self.active_session) {
-            let next_idx = (idx + 1) % self.session_tabs.len();
-            self.switch_session(self.session_tabs[next_idx].id);
-        }
-    }
-
-    /// Switch to the previous session (cycles through tabs)
-    pub fn prev_session(&mut self) {
-        if let Some(idx) = self.session_tabs.iter().position(|t| t.id == self.active_session) {
-            let prev_idx = if idx == 0 {
-                self.session_tabs.len() - 1
-            } else {
-                idx - 1
-            };
-            self.switch_session(self.session_tabs[prev_idx].id);
-        }
-    }
-
     // ========================================================================
     // Message Management
     // ========================================================================
@@ -251,6 +243,12 @@ impl TuiAssistant {
     /// Add a user message to the conversation
     pub fn push_user_message(&mut self, text: String) {
         self.messages.push(ChatMessage::User { text });
+        self.scroll_to_bottom();
+    }
+
+    /// Add an error message to the conversation
+    pub fn push_error_message(&mut self, text: String) {
+        self.messages.push(ChatMessage::Error { text });
         self.scroll_to_bottom();
     }
 
@@ -760,16 +758,204 @@ impl Widget for &TuiAssistant {
 // Rendering Functions
 // ============================================================================
 
-/// Render the session tab bar
+// Tab bar configuration constants
+const TAB_PADDING: usize = 2;       // " name " -> 2 spaces around name
+const TAB_SEPARATOR: usize = 1;     // Space between tabs
+const TAB_PLUS_BUTTON_WIDTH: usize = 4; // " + " with leading space
+
+/// Generate a short tab name like "S1", "S2" from the tab name.
+/// Extracts the number from the name, or uses the provided index + 1.
+fn get_short_tab_name(name: &str, index: usize) -> String {
+    // Try to extract number from name (e.g., "Session 3" -> "3")
+    let num: String = name.chars().filter(|c| c.is_ascii_digit()).collect();
+    if num.is_empty() {
+        format!("S{}", index + 1)
+    } else {
+        format!("S{}", num)
+    }
+}
+
+/// Calculate the display width of a tab.
+/// If `use_short` is true, uses short form (S1, S2); otherwise uses full name.
+fn calculate_tab_width(name: &str, index: usize, use_short: bool) -> usize {
+    let display_name = if use_short {
+        get_short_tab_name(name, index)
+    } else {
+        name.to_string()
+    };
+    TAB_PADDING + unicode_width::UnicodeWidthStr::width(display_name.as_str())
+}
+
+/// Calculate total width for tabs in a range.
+/// Active tab always uses full name, others use short form if `others_short` is true.
+fn calculate_tabs_width_mixed(
+    tabs: &[SessionTab],
+    range: std::ops::Range<usize>,
+    active_idx: usize,
+    others_short: bool,
+) -> usize {
+    let mut total = 0;
+    for (i, idx) in range.clone().enumerate() {
+        if i > 0 {
+            total += TAB_SEPARATOR;
+        }
+        let use_short = others_short && idx != active_idx;
+        total += calculate_tab_width(&tabs[idx].name, idx, use_short);
+    }
+    total
+}
+
+/// Check if all tabs fit with full names.
+fn all_tabs_fit_full(tabs: &[SessionTab], active_idx: usize, available_width: usize) -> bool {
+    calculate_tabs_width_mixed(tabs, 0..tabs.len(), active_idx, false) <= available_width
+}
+
+/// Check if all tabs fit with active full, others short.
+fn all_tabs_fit_mixed(tabs: &[SessionTab], active_idx: usize, available_width: usize) -> bool {
+    calculate_tabs_width_mixed(tabs, 0..tabs.len(), active_idx, true) <= available_width
+}
+
+/// Calculate visible tab range centered around active tab.
+/// Active tab uses full name, others use short form.
+/// Returns (start_idx, end_idx, hidden_left, hidden_right).
+fn calculate_visible_range(
+    tabs: &[SessionTab],
+    active_idx: usize,
+    available_width: usize,
+) -> (usize, usize, usize, usize) {
+    let num_tabs = tabs.len();
+    if num_tabs == 0 {
+        return (0, 0, 0, 0);
+    }
+
+    // Width of hidden indicators: "‹N " and " N›" (each ~3-4 chars)
+    let indicator_width = 4;
+
+    // Start with just the active tab (full name)
+    let mut start = active_idx;
+    let mut end = active_idx + 1;
+
+    // Helper to calculate current width including potential indicators
+    let calc_width = |s: usize, e: usize| -> usize {
+        let mut w = calculate_tabs_width_mixed(tabs, s..e, active_idx, true);
+        if s > 0 {
+            w += indicator_width;
+        }
+        if e < num_tabs {
+            w += indicator_width;
+        }
+        w
+    };
+
+    // Expand alternately left and right while we have space
+    loop {
+        let mut expanded = false;
+
+        // Try to expand right
+        if end < num_tabs {
+            let new_width = calc_width(start, end + 1);
+            if new_width <= available_width {
+                end += 1;
+                expanded = true;
+            }
+        }
+
+        // Try to expand left
+        if start > 0 {
+            let new_width = calc_width(start - 1, end);
+            if new_width <= available_width {
+                start -= 1;
+                expanded = true;
+            }
+        }
+
+        if !expanded {
+            break;
+        }
+    }
+
+    (start, end, start, num_tabs - end)
+}
+
+/// Render the session tab bar with overflow handling.
+///
+/// Strategy:
+/// 1. Try to fit all tabs with full names
+/// 2. If not, show active tab with full name, others with short form (S1, S2, ...)
+/// 3. If still doesn't fit, show only tabs around active one with hidden indicators
 fn render_tab_bar(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
     let mut spans = Vec::new();
+    let tabs = &assistant.session_tabs;
+    let num_tabs = tabs.len();
 
-    for (i, tab) in assistant.session_tabs.iter().enumerate() {
-        if i > 0 {
+    if num_tabs == 0 {
+        // Just show the "+" button
+        spans.push(Span::styled(" + ", Style::default().fg(Color::Green)));
+        let line = Line::from(spans);
+        Paragraph::new(line).render(area, buf);
+        return;
+    }
+
+    // Find the index of the active session
+    let active_idx = tabs
+        .iter()
+        .position(|t| t.id == assistant.active_session)
+        .unwrap_or(0);
+
+    // Calculate available width for tabs (excluding "+" button)
+    let total_width = area.width as usize;
+    let available_for_tabs = total_width.saturating_sub(TAB_PLUS_BUTTON_WIDTH);
+
+    // Determine display mode:
+    // - Mode 0: All tabs with full names
+    // - Mode 1: Active full, others short (S1, S2, ...)
+    // - Mode 2: Only visible range around active, with hidden indicators
+    let (visible_start, visible_end, hidden_left, hidden_right, use_short_for_others) =
+        if all_tabs_fit_full(tabs, active_idx, available_for_tabs) {
+            // All tabs fit with full names
+            (0, num_tabs, 0, 0, false)
+        } else if all_tabs_fit_mixed(tabs, active_idx, available_for_tabs) {
+            // All tabs fit with active full, others short
+            (0, num_tabs, 0, 0, true)
+        } else {
+            // Need to hide some tabs
+            let (start, end, left, right) =
+                calculate_visible_range(tabs, active_idx, available_for_tabs);
+            (start, end, left, right, true)
+        };
+
+    // Render left hidden indicator
+    if hidden_left > 0 {
+        spans.push(Span::styled(
+            format!("‹{} ", hidden_left),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    // Find next tab index for Tab hint (within visible range)
+    let next_idx_global = (active_idx + 1) % num_tabs;
+    let next_in_visible = if next_idx_global >= visible_start && next_idx_global < visible_end {
+        Some(next_idx_global)
+    } else {
+        None
+    };
+
+    // Render visible tabs
+    for (render_idx, tab_idx) in (visible_start..visible_end).enumerate() {
+        let tab = &tabs[tab_idx];
+
+        if render_idx > 0 {
             spans.push(Span::raw(" "));
         }
 
         let is_active = tab.id == assistant.active_session;
+        let is_next = Some(tab_idx) == next_in_visible && num_tabs > 1;
+
+        // Add Tab hint before the next session (subtle indicator)
+        if is_next && !is_active {
+            spans.push(Span::styled("⇥", Style::default().fg(Color::DarkGray)));
+        }
+
         let style = if is_active {
             Style::default()
                 .fg(Color::Black)
@@ -779,11 +965,25 @@ fn render_tab_bar(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
             Style::default().fg(Color::Gray)
         };
 
-        let tab_text = format!(" {} ", tab.name);
+        // Active tab always shows full name, others may be shortened
+        let display_name = if is_active || !use_short_for_others {
+            tab.name.clone()
+        } else {
+            get_short_tab_name(&tab.name, tab_idx)
+        };
+        let tab_text = format!(" {} ", display_name);
         spans.push(Span::styled(tab_text, style));
     }
 
-    // Add "+" button for new session
+    // Render right hidden indicator
+    if hidden_right > 0 {
+        spans.push(Span::styled(
+            format!(" {}›", hidden_right),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    // Add "+" button for new session (Ctrl+B,T in command mode)
     spans.push(Span::raw(" "));
     spans.push(Span::styled(" + ", Style::default().fg(Color::Green)));
 
@@ -910,7 +1110,10 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
                         all_lines.push(line);
                     }
                 }
-                all_lines.push(Line::raw("")); // Empty line after message
+                // Only add empty line if message has content (skip for empty placeholder before command cards)
+                if !text.is_empty() || *is_streaming {
+                    all_lines.push(Line::raw("")); // Empty line after message
+                }
             }
             ChatMessage::CommandCard {
                 command,
@@ -919,6 +1122,26 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
             } => {
                 all_lines.extend(render_command_card(command, explanation, *status, area.width));
                 all_lines.push(Line::raw("")); // Empty line after card
+            }
+            ChatMessage::Error { text } => {
+                // Render error message with distinct styling
+                let wrapped = wrap_text_lines(text, area.width, "⚠ ");
+                for (i, line) in wrapped.into_iter().enumerate() {
+                    if i == 0 {
+                        let line_str = line.to_string();
+                        let content = line_str.trim_start_matches("⚠ ").to_string();
+                        all_lines.push(Line::from(vec![
+                            Span::styled("⚠ ", Style::default().fg(Color::Red).bold()),
+                            Span::styled(content, Style::default().fg(Color::Red)),
+                        ]));
+                    } else {
+                        all_lines.push(Line::styled(
+                            line.to_string(),
+                            Style::default().fg(Color::Red),
+                        ));
+                    }
+                }
+                all_lines.push(Line::raw("")); // Empty line after error
             }
         }
     }

@@ -86,9 +86,16 @@ impl Widget for &App {
         block_ai.render(layout.assistant_area, buf);
         // Render separator
         if self.get_command_mode() {
-            let extra_hints = match active {
-                ActivePane::Terminal => vec![(" ^B".into(), "Send ^B to shell ".into())],
-                ActivePane::Assistant => vec![],
+            let extra_hints: Vec<(String, String)> = match active {
+                ActivePane::Terminal => vec![
+                    (" ^B".into(), "Send ^B to shell".into()),
+                ],
+                ActivePane::Assistant => vec![
+                    (" T".into(), "New session".into()),
+                    (" W".into(), "Close session".into()),
+                    (" ]".into(), "Next session".into()),
+                    (" [".into(), "Previous session".into()),
+                ],
             };
             render_command_mode_hint(area, buf, cmdmode_color, extra_hints);
         }

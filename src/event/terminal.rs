@@ -1,7 +1,9 @@
 //! Key event handling for the Terminal pane.
 
 use anyhow::Result;
-use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+use crossterm::event::{KeyEvent, KeyEventKind, KeyCode, KeyModifiers};
+
+use super::UserEvent;
 
 use crate::ui::terminal::TuiTerminal;
 use crate::shell::ShellManager;
@@ -17,7 +19,7 @@ pub fn handle_key_event(
 ) -> Result<()> {
     let KeyEvent { code, modifiers, .. } = key_evt;
     let shift = modifiers.contains(KeyModifiers::SHIFT);
-    
+
     // Handle scrolling with Shift + PageUp/PageDown/Up/Down
     if shift {
         match code {
@@ -44,7 +46,7 @@ pub fn handle_key_event(
             _ => {}
         }
     }
-    
+
     // For any other input, if scrolled back, auto-scroll to bottom
     if terminal.is_scrolled() {
         // Only auto-scroll for actual input keys (not just modifiers)
@@ -52,7 +54,7 @@ pub fn handle_key_event(
             terminal.scroll_to_bottom();
         }
     }
-    
+
     // Convert key event to bytes and forward to shell
     let bytes = key_to_bytes(key_evt);
     if !bytes.is_empty() {
@@ -60,6 +62,27 @@ pub fn handle_key_event(
     }
 
     Ok(())
+}
+
+/// Handle command mode keys specific to Terminal pane.
+///
+/// Returns true if the event was handled.
+pub fn handle_command_mode(
+    terminal: &mut TuiTerminal,
+    shell: &mut ShellManager,
+    event: UserEvent,
+) -> Result<bool> {
+    match event {
+        // Forward Ctrl+B to terminal
+        UserEvent::Key(e) if
+            matches!(e.kind, KeyEventKind::Press)
+         && matches!(e.modifiers, KeyModifiers::CONTROL)
+         && matches!(e.code, KeyCode::Char('b') | KeyCode::Char('B')) => {
+            handle_key_event(terminal, shell, e)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// Converts a crossterm key event to terminal byte sequence.

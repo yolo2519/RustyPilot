@@ -57,7 +57,7 @@ impl AiClient {
         ctx: &ContextSnapshot,
     ) -> Result<AiCommandSuggestion> {
         // Build prompt with context
-        let prompt_text = prompt::build_prompt(user_query, ctx);
+        let prompt_text = prompt::build_prompt(user_query, ctx)?;
 
         // Create user message
         let user_msg = ChatCompletionRequestUserMessageArgs::default()
@@ -96,7 +96,7 @@ impl AiClient {
         ctx: &ContextSnapshot,
     ) -> Result<String> {
         // Build prompt with context
-        let prompt_text = prompt::build_prompt(user_query, ctx);
+        let prompt_text = prompt::build_prompt(user_query, ctx)?;
 
         // Create user message
         let user_msg = ChatCompletionRequestUserMessageArgs::default()
