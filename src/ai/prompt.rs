@@ -3,54 +3,107 @@
 //! This module constructs structured prompts that include user queries
 //! along with relevant context information (working directory, environment,
 //! command history) to provide better AI command suggestions.
+//!
+//! User messages are formatted as JSON to enable reliable extraction of the
+//! original user request from conversation history.
 
 use crate::context::ContextSnapshot;
+use serde::{Deserialize, Serialize};
 
 /// System prompt that defines the AI assistant's behavior and personality.
 pub const SYSTEM_PROMPT: &str = r#"You are an expert shell command assistant integrated into a terminal emulator. Your role is to help users execute shell commands safely and efficiently.
 
-Guidelines:
-1. Understand the user's natural language request.
-2. When the user asks for help with a command or task, use the `suggest_command` tool to provide a structured suggestion.
+**Input Format**: User messages are JSON with "user_request" (what to respond to) and "context" (shell environment).
+**Output Format**: Always respond in plain text (NOT JSON). Use the suggest_command tool for commands.
+
+## CRITICAL RULE: Tool Usage for Commands
+
+**You MUST use the `suggest_command` tool whenever you want to suggest ANY shell command.**
+**NEVER write commands as plain text in your response. This is a hard requirement.**
+
+When you think "the user should run X" or "try this command: X", you MUST call suggest_command instead.
+
+Examples that REQUIRE tool use:
+- "how do I list files" → MUST use suggest_command
+- "delete all .tmp files" → MUST use suggest_command
+- "help me find large files" → MUST use suggest_command
+- "what's the command to..." → MUST use suggest_command
+- User describes any task involving shell commands → MUST use suggest_command
+
+The ONLY time you respond with plain text (no tool) is when:
+- Answering general questions that don't involve running commands
+- Asking for clarification before you can suggest a command
+- Explaining concepts without suggesting a specific command to execute
+
+## Guidelines
+
+1. Focus on the "user_request" field - this is the user's actual question or task.
+2. Use the "context" to understand the user's environment and provide relevant suggestions.
 3. Explain what the command does and any potential side effects in the explanation field.
-4. Use the risk_level field to indicate if the command is safe (low), modifies files (medium), or could be destructive (high).
+4. Use the risk_level field: low (safe/read-only), medium (modifies files), high (destructive/system-changing).
 5. Consider the user's current directory and environment when suggesting commands.
 6. Prefer portable POSIX-compliant commands when possible.
 
-When to use the suggest_command tool:
-- When the user asks "how do I...", "help me...", "what command...", etc.
-- When the user describes a task they want to accomplish
-- When suggesting a fix for an error
-
-When NOT to use the tool:
-- When the user asks a general question (just respond with text)
-- When the user is chatting or doesn't need a command
-- When you need clarification before suggesting a command
-
 Be concise but thorough. Safety first."#;
 
+/// Structured user prompt for JSON serialization.
+///
+/// This structure ensures that user requests can be reliably extracted from
+/// conversation history, regardless of what the user types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPrompt {
+    /// The user's original request (what they actually typed)
+    pub user_request: String,
+    /// Shell context information
+    pub context: PromptContext,
+}
+
+/// Context information included in the prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptContext {
+    /// Current working directory
+    pub cwd: String,
+    /// Relevant environment variables
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub env: Vec<(String, String)>,
+    /// Recent command history
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub recent_history: Vec<String>,
+    /// Recent terminal output
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub recent_output: Vec<String>,
+}
+
 /// Build a complete prompt for the AI including context and user query.
-pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> String {
-    let mut prompt = String::new();
+///
+/// Returns a JSON-formatted string that can be reliably parsed to extract
+/// the original user request.
+///
+/// # Errors
+///
+/// Returns an error if JSON serialization fails (should be extremely rare).
+pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> Result<String, serde_json::Error> {
+    let prompt = UserPrompt {
+        user_request: user_query.to_string(),
+        context: PromptContext {
+            cwd: ctx.cwd.clone(),
+            env: ctx.env_vars.clone(),
+            recent_history: ctx.recent_history.clone(),
+            recent_output: ctx.recent_output.iter().rev().take(6).rev().cloned().collect(),
+        },
+    };
 
-    // User's request
-    prompt.push_str("USER REQUEST:\n");
-    prompt.push_str(user_query);
-    prompt.push_str("\n\n");
+    serde_json::to_string_pretty(&prompt)
+}
 
-    // System Context
-    prompt.push_str("--- Context ---\n");
-    prompt.push_str(&ctx.format_for_prompt());
-
-    // Recent terminal output (not included in format_for_prompt)
-    if !ctx.recent_output.is_empty() {
-        prompt.push_str("\nRECENT TERMINAL OUTPUT (last few lines):\n");
-        for line in ctx.recent_output.iter().rev().take(6).rev() {
-            prompt.push_str(&format!("  {}\n", line));
-        }
-    }
-
-    prompt
+/// Extract the original user request from a JSON-formatted prompt.
+///
+/// This is the inverse of `build_prompt()` - it extracts just the user's
+/// original input without the context information.
+pub fn extract_user_request(prompt_json: &str) -> Option<String> {
+    serde_json::from_str::<UserPrompt>(prompt_json)
+        .ok()
+        .map(|p| p.user_request)
 }
 
 /// Build a prompt for command explanation.
@@ -74,7 +127,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_prompt_basic() {
+    fn test_build_prompt_basic() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = ContextSnapshot {
             cwd: "/home/user/projects".to_string(),
             env_vars: vec![
@@ -85,17 +138,18 @@ mod tests {
             recent_output: vec!["output line".to_string()],
         };
 
-        let prompt = build_prompt("list all files", &ctx);
+        let prompt = build_prompt("list all files", &ctx)?;
 
-        assert!(prompt.contains("USER REQUEST:"));
-        assert!(prompt.contains("list all files"));
-        assert!(prompt.contains("Current directory: /home/user/projects"));
-        assert!(prompt.contains("RECENT TERMINAL OUTPUT"));
-        assert!(prompt.contains("output line"));
+        // Verify it's valid JSON
+        let parsed: UserPrompt = serde_json::from_str(&prompt)?;
+        assert_eq!(parsed.user_request, "list all files");
+        assert_eq!(parsed.context.cwd, "/home/user/projects");
+        assert!(parsed.context.recent_output.contains(&"output line".to_string()));
+        Ok(())
     }
 
     #[test]
-    fn test_build_prompt_empty_context() {
+    fn test_build_prompt_empty_context() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = ContextSnapshot {
             cwd: "/".to_string(),
             env_vars: vec![],
@@ -103,10 +157,45 @@ mod tests {
             recent_output: vec![],
         };
 
-        let prompt = build_prompt("help me", &ctx);
+        let prompt = build_prompt("help me", &ctx)?;
 
-        assert!(prompt.contains("USER REQUEST:"));
-        assert!(prompt.contains("help me"));
-        assert!(prompt.contains("Current directory: /"));
+        let parsed: UserPrompt = serde_json::from_str(&prompt)?;
+        assert_eq!(parsed.user_request, "help me");
+        assert_eq!(parsed.context.cwd, "/");
+        Ok(())
+    }
+
+    #[test]
+    fn test_extract_user_request() -> Result<(), Box<dyn std::error::Error>> {
+        let ctx = ContextSnapshot {
+            cwd: "/tmp".to_string(),
+            env_vars: vec![],
+            recent_history: vec![],
+            recent_output: vec![],
+        };
+
+        let prompt = build_prompt("find large files", &ctx)?;
+        let extracted = extract_user_request(&prompt);
+
+        assert_eq!(extracted, Some("find large files".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_extract_user_request_with_special_chars() -> Result<(), Box<dyn std::error::Error>> {
+        let ctx = ContextSnapshot {
+            cwd: "/".to_string(),
+            env_vars: vec![],
+            recent_history: vec![],
+            recent_output: vec![],
+        };
+
+        // Test with special characters that need JSON escaping
+        let query = "find files with \"quotes\" and\nnewlines";
+        let prompt = build_prompt(query, &ctx)?;
+        let extracted = extract_user_request(&prompt);
+
+        assert_eq!(extracted, Some(query.to_string()));
+        Ok(())
     }
 }

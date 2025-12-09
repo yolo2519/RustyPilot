@@ -122,6 +122,7 @@ pub struct CommandSuggestionRecord {
 pub struct AiSession {
     pub id: SessionId,
     /// Full conversation history for OpenAI API (includes system, user, assistant, tool messages)
+    /// User messages are JSON-formatted and can be parsed to extract the original request.
     pub conversation_history: Vec<ChatCompletionRequestMessage>,
     /// Accumulated response text from current streaming request
     pub current_response: String,
@@ -145,6 +146,97 @@ impl AiSession {
             command_suggestions: Vec::new(),
             pending_suggestion_idx: None,
         })
+    }
+
+    /// Clear conversation history, keeping only the system prompt.
+    fn clear(&mut self) {
+        // Keep only the first message (system prompt)
+        self.conversation_history.truncate(1);
+        self.current_response.clear();
+        self.command_suggestions.clear();
+        self.pending_suggestion_idx = None;
+    }
+
+    /// Convert conversation history to UI-displayable ChatMessage format.
+    ///
+    /// This parses user messages from JSON format to extract the original request,
+    /// and includes assistant messages and command cards.
+    pub fn to_ui_messages(&self) -> Vec<crate::ui::assistant::ChatMessage> {
+        use crate::ui::assistant::{ChatMessage, CommandStatus};
+
+        let mut messages = Vec::new();
+        let mut command_idx = 0;
+
+        for msg in &self.conversation_history {
+            match msg {
+                ChatCompletionRequestMessage::User(user_msg) => {
+                    // Extract text content from user message
+                    let prompt_text = match &user_msg.content {
+                        async_openai::types::ChatCompletionRequestUserMessageContent::Text(t) => t,
+                        async_openai::types::ChatCompletionRequestUserMessageContent::Array(_) => {
+                            continue;
+                        }
+                    };
+
+                    // Parse JSON to extract original user request
+                    let user_request = prompt::extract_user_request(prompt_text)
+                        .unwrap_or_else(|| prompt_text.clone());
+
+                    messages.push(ChatMessage::User { text: user_request });
+                }
+                ChatCompletionRequestMessage::Assistant(asst_msg) => {
+                    // Extract text content from assistant message (may be empty for tool-call-only responses)
+                    let text_content = asst_msg.content.as_ref().and_then(|content| {
+                        match content {
+                            async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(t) => {
+                                if t.is_empty() { None } else { Some(t.clone()) }
+                            }
+                            async_openai::types::ChatCompletionRequestAssistantMessageContent::Array(_) => None,
+                        }
+                    });
+
+                    // Check if this assistant message has tool calls
+                    let has_tool_calls = asst_msg.tool_calls.as_ref().map(|tc| !tc.is_empty()).unwrap_or(false);
+
+                    // Add assistant text message if present, or empty placeholder if only tool calls
+                    if let Some(text) = text_content {
+                        messages.push(ChatMessage::Assistant {
+                            text,
+                            is_streaming: false,
+                        });
+                    } else if has_tool_calls {
+                        // Add empty assistant message to match real-time behavior
+                        messages.push(ChatMessage::Assistant {
+                            text: String::new(),
+                            is_streaming: false,
+                        });
+                    }
+
+                    // Add command cards for tool calls
+                    if let Some(tool_calls) = &asst_msg.tool_calls {
+                        for _ in tool_calls {
+                            if let Some(record) = self.command_suggestions.get(command_idx) {
+                                let status = match record.status {
+                                    CommandSuggestionStatus::Pending => CommandStatus::Pending,
+                                    CommandSuggestionStatus::Accepted => CommandStatus::Executed,
+                                    CommandSuggestionStatus::Rejected => CommandStatus::Rejected,
+                                };
+                                messages.push(ChatMessage::CommandCard {
+                                    command: record.command.clone(),
+                                    explanation: record.explanation.clone(),
+                                    status,
+                                });
+                                command_idx += 1;
+                            }
+                        }
+                    }
+                }
+                // System and Tool messages are not displayed to the user
+                _ => {}
+            }
+        }
+
+        messages
     }
 }
 
@@ -203,6 +295,79 @@ impl AiSessionManager {
 
     pub fn current_session_id(&self) -> SessionId {
         self.current_id
+    }
+
+    /// Get all session tabs for UI rendering.
+    ///
+    /// Returns a list of SessionTab structs sorted by session ID.
+    pub fn get_session_tabs(&self) -> Vec<crate::ui::assistant::SessionTab> {
+        use crate::ui::assistant::SessionTab;
+
+        let mut tabs: Vec<_> = self.sessions.keys()
+            .map(|&id| SessionTab {
+                id,
+                name: format!("Session {}", id),
+            })
+            .collect();
+        tabs.sort_by_key(|t| t.id);
+        tabs
+    }
+
+    /// Get the messages for a specific session in UI format.
+    ///
+    /// This parses user messages from JSON to extract the original request,
+    /// and includes assistant responses and command cards.
+    /// If there's an in-progress streaming response, it's included as well.
+    pub fn get_session_messages(&self, session_id: SessionId) -> Vec<crate::ui::assistant::ChatMessage> {
+        use crate::ui::assistant::ChatMessage;
+
+        let Some(session) = self.sessions.get(&session_id) else {
+            return Vec::new();
+        };
+
+        let mut messages = session.to_ui_messages();
+
+        // If there's an in-progress streaming response, add it
+        if !session.current_response.is_empty() {
+            messages.push(ChatMessage::Assistant {
+                text: session.current_response.clone(),
+                is_streaming: true,
+            });
+        }
+
+        messages
+    }
+
+    /// Get the next session ID (cycles through sessions).
+    ///
+    /// Returns the session ID after the current one, wrapping to the first if at the end.
+    pub fn next_session_id(&self) -> Option<SessionId> {
+        if self.sessions.is_empty() {
+            return None;
+        }
+        let mut ids: Vec<_> = self.sessions.keys().copied().collect();
+        ids.sort();
+        let current_idx = ids.iter().position(|&id| id == self.current_id).unwrap_or(0);
+        let next_idx = (current_idx + 1) % ids.len();
+        Some(ids[next_idx])
+    }
+
+    /// Get the previous session ID (cycles through sessions).
+    ///
+    /// Returns the session ID before the current one, wrapping to the last if at the beginning.
+    pub fn prev_session_id(&self) -> Option<SessionId> {
+        if self.sessions.is_empty() {
+            return None;
+        }
+        let mut ids: Vec<_> = self.sessions.keys().copied().collect();
+        ids.sort();
+        let current_idx = ids.iter().position(|&id| id == self.current_id).unwrap_or(0);
+        let prev_idx = if current_idx == 0 {
+            ids.len() - 1
+        } else {
+            current_idx - 1
+        };
+        Some(ids[prev_idx])
     }
 
     pub fn switch_session(&mut self, session_id: SessionId) -> bool {
@@ -298,6 +463,39 @@ impl AiSessionManager {
         Ok(id)
     }
 
+    /// Close a session and switch to an adjacent one.
+    ///
+    /// Returns the new active session ID, or None if this was the last session
+    /// (in which case the session is not closed).
+    pub fn close_session(&mut self, session_id: SessionId) -> Option<SessionId> {
+        // If this is the last session, clear it instead of closing
+        if self.sessions.len() <= 1 {
+            if let Some(session) = self.sessions.get_mut(&session_id) {
+                session.clear();
+            }
+            return Some(session_id);
+        }
+
+        // Find the next session to switch to before removing
+        let mut ids: Vec<_> = self.sessions.keys().copied().collect();
+        ids.sort();
+        let current_idx = ids.iter().position(|&id| id == session_id)?;
+
+        // Choose next session (prefer next, fallback to previous)
+        let new_id = if current_idx + 1 < ids.len() {
+            ids[current_idx + 1]
+        } else {
+            ids[current_idx.saturating_sub(1)]
+        };
+
+        // Remove the session
+        self.sessions.remove(&session_id);
+
+        // Switch to the new session
+        self.current_id = new_id;
+        Some(new_id)
+    }
+
     /// Send a message to the AI with system context and receive a streaming response.
     ///
     /// This method:
@@ -325,10 +523,21 @@ impl AiSessionManager {
             }
         };
 
-        // Build prompt with context
-        let prompt = prompt::build_prompt(user_input, &context);
+        // Build prompt with context (JSON format for reliable extraction)
+        let prompt = match prompt::build_prompt(user_input, &context) {
+            Ok(p) => p,
+            Err(e) => {
+                if let Err(e) = self.ai_stream_tx.try_send(AiStreamData::Error {
+                    session_id,
+                    error: format!("Failed to build prompt: {}", e),
+                }) {
+                    error!("Failed to send error event: {:?}", e);
+                }
+                return;
+            }
+        };
 
-        // Create user message
+        // Create user message for OpenAI API
         let user_msg = match ChatCompletionRequestUserMessageArgs::default()
             .content(prompt)
             .build()

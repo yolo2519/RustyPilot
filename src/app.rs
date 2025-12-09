@@ -344,30 +344,50 @@ impl App {
     fn handle_command_mode_events(&mut self, event: UserEvent) -> Result<()> {
         assert!(self.command_mode);
 
-        match event {
-            // mock event: n => toggle pane
+        // Common commands (available in both panes)
+        match &event {
+            // n => toggle pane (switch between Terminal and Assistant)
             UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('n') | KeyCode::Char('N')) => {
                 self.toggle_pane();
+                self.set_command_mode(false);
+                return Ok(());
             }
-            // mock event: c => exit
+
+            // c => exit application
             UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('c') | KeyCode::Char('C')) => {
                 self.exit = true;
+                self.set_command_mode(false);
+                return Ok(());
             }
-            // L => force redraw (refresh all, clear stderr pollution)
+
+            // l => force redraw (refresh all, clear stderr pollution)
             UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('l') | KeyCode::Char('L')) => {
-                // Set flag to trigger a full screen clear and redraw
                 self.force_redraw_flag = true;
+                self.set_command_mode(false);
+                return Ok(());
             }
-            UserEvent::Key(e) if
-                matches!(e.kind, KeyEventKind::Press)
-             && matches!(e.modifiers, KeyModifiers::CONTROL)
-             && matches!(e.code, KeyCode::Char('b') | KeyCode::Char('B'))
-             && self.active_pane == ActivePane::Terminal => {
-                // forward keyboard event to shell
-                crate::event::terminal::handle_key_event(&mut self.tui_terminal, &mut self.shell_manager, e)?;
-            }
-            _ => {},
+
+            _ => {}
         }
+
+        // Pane-specific commands
+        match self.active_pane {
+            ActivePane::Terminal => {
+                crate::event::terminal::handle_command_mode(
+                    &mut self.tui_terminal,
+                    &mut self.shell_manager,
+                    event,
+                )?;
+            }
+            ActivePane::Assistant => {
+                crate::event::assistant::handle_command_mode(
+                    &mut self.tui_assistant,
+                    &mut self.ai_sessions,
+                    event,
+                )?;
+            }
+        }
+
         self.set_command_mode(false);
         Ok(())
     }

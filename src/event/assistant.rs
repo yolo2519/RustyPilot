@@ -1,8 +1,9 @@
 //! Key event handling for the AI Assistant pane.
 
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use super::UserEvent;
 use crate::ai::session::AiSessionManager;
 use crate::ui::assistant::TuiAssistant;
 
@@ -153,15 +154,86 @@ pub fn handle_key_event(
         }
 
         // Session switching (Tab / Shift+Tab)
+        // Sessions are managed by the backend, frontend just displays
         KeyCode::Tab => {
-            if key_evt.modifiers.contains(KeyModifiers::SHIFT) {
-                assistant.prev_session();
+            let new_id = if key_evt.modifiers.contains(KeyModifiers::SHIFT) {
+                ai_sessions.prev_session_id()
             } else {
-                assistant.next_session();
+                ai_sessions.next_session_id()
+            };
+
+            if let Some(id) = new_id {
+                // Switch backend session
+                ai_sessions.switch_session(id);
+                // Switch frontend session and load messages
+                assistant.switch_session(id);
+                let messages = ai_sessions.get_session_messages(id);
+                assistant.load_messages(messages);
+                // Sync tab list (in case it changed)
+                assistant.sync_session_tabs(ai_sessions.get_session_tabs());
             }
         }
 
         _ => {}
     }
     Ok(())
+}
+
+/// Handle command mode keys specific to Assistant pane.
+///
+/// Returns true if the event was handled.
+pub fn handle_command_mode(
+    assistant: &mut TuiAssistant,
+    ai_sessions: &mut AiSessionManager,
+    event: UserEvent,
+) -> Result<bool> {
+    match event {
+        // t => create new AI session
+        UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('t') | KeyCode::Char('T')) => {
+            if let Ok(new_id) = ai_sessions.new_session() {
+                assistant.switch_session(new_id);
+                assistant.load_messages(vec![]);
+                assistant.sync_session_tabs(ai_sessions.get_session_tabs());
+            }
+            Ok(true)
+        }
+
+        // w => close current AI session
+        UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('w') | KeyCode::Char('W')) => {
+            let current_id = assistant.active_session_id();
+            if let Some(new_id) = ai_sessions.close_session(current_id) {
+                assistant.switch_session(new_id);
+                let messages = ai_sessions.get_session_messages(new_id);
+                assistant.load_messages(messages);
+                assistant.sync_session_tabs(ai_sessions.get_session_tabs());
+            }
+            Ok(true)
+        }
+
+        // ] => next AI session
+        UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char(']')) => {
+            if let Some(new_id) = ai_sessions.next_session_id() {
+                ai_sessions.switch_session(new_id);
+                assistant.switch_session(new_id);
+                let messages = ai_sessions.get_session_messages(new_id);
+                assistant.load_messages(messages);
+                assistant.sync_session_tabs(ai_sessions.get_session_tabs());
+            }
+            Ok(true)
+        }
+
+        // [ => previous AI session
+        UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('[')) => {
+            if let Some(new_id) = ai_sessions.prev_session_id() {
+                ai_sessions.switch_session(new_id);
+                assistant.switch_session(new_id);
+                let messages = ai_sessions.get_session_messages(new_id);
+                assistant.load_messages(messages);
+                assistant.sync_session_tabs(ai_sessions.get_session_tabs());
+            }
+            Ok(true)
+        }
+
+        _ => Ok(false),
+    }
 }
