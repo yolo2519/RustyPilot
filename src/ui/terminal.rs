@@ -144,9 +144,21 @@ impl TuiTerminal {
                 {
                     error!("Failed to send shell output event: {:?}", e);
                 }
+                self.process(&bytes);
             }
         }
     }
+
+    /// Process VT100 output data.
+    fn process(&mut self, data: &[u8]) {
+        self.processor.advance(&mut self.term, data);
+
+        // Auto-scroll to bottom when new data arrives ONLY if not scrolled
+        if self.scroll_offset == 0 {
+            self.scroll_to_bottom();
+        }
+    }
+
     /// Scroll up by n lines (into history).
     pub fn scroll_up(&mut self, n: usize) {
         let grid = self.term.grid();
