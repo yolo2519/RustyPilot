@@ -132,7 +132,13 @@ impl TuiTerminal {
     /// Call this in tokio::select! to handle async PTY data.
     pub async fn recv_pty_output(&mut self) {
         if let Some(bytes) = self.pty_output.recv().await {
-            // Emit a small text snippet for context building
+            // Always process PTY output for terminal display (including newlines, etc.)
+            self.process(&bytes);
+
+            // TODO: the raw pty output is sometimes just GIBBERISH for AI.
+            // TODO: Use rendered output instead.
+            // TODO: do shell integration to see the boundary of commands (OSC)
+            // Emit a small text snippet for context building (skip pure whitespace)
             let snippet = String::from_utf8_lossy(&bytes);
             let trimmed = snippet.trim();
             if !trimmed.is_empty() {
@@ -144,7 +150,6 @@ impl TuiTerminal {
                 {
                     error!("Failed to send shell output event: {:?}", e);
                 }
-                self.process(&bytes);
             }
         }
     }
@@ -336,8 +341,14 @@ impl Widget for &TuiTerminal {
                     if x >= area.x + area.width {
                         break;
                     }
+
+                    // Render tab as a single space since alacritty_terminal has already
+                    // handled cursor movement. The tab character in the grid just marks
+                    // the position where tab was, subsequent characters are already at
+                    // correct positions.
+                    let render_char = if c == '\t' { ' ' } else { c };
                     if let Some(cell) = buf.cell_mut((x, area.y + row as u16)) {
-                        cell.set_char(c).set_style(span.style);
+                        cell.set_char(render_char).set_style(span.style);
                     }
                     x += 1;
                 }
