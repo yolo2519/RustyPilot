@@ -25,6 +25,7 @@ use crate::app::{ActivePane, App};
 pub mod assistant;
 pub mod layout;
 pub mod terminal;
+pub mod visual;
 
 impl Widget for &App {
     fn render(self, area: ratatui::prelude::Rect, buf: &mut ratatui::prelude::Buffer) {
@@ -33,16 +34,27 @@ impl Widget for &App {
 
         let active = self.get_active_pane();
         let cmdmode_color = Color::Yellow;
-        let active_termcolor = if self.get_command_mode() { cmdmode_color } else { Color::Green };
-        let active_aicolor = if self.get_command_mode() { cmdmode_color } else { Color::Cyan };
-        let inactive_color = if self.get_command_mode() { cmdmode_color } else { Color::DarkGray };
 
-        // Render terminal pane border with scroll indicator
-        let term_title = if self.tui_terminal.is_scrolled() {
-            format!("RustyTerm [Scrolled ↑{}]", self.tui_terminal.scroll_offset())
+        // Get pane status from components (they own their visual mode state)
+        let term_status = self.tui_terminal.get_pane_status();
+        let ai_status = self.tui_assistant.get_pane_status();
+
+        // Determine colors based on mode
+        let default_term_color = Color::Green;
+        let default_ai_color = Color::Cyan;
+        let inactive_color = Color::DarkGray;
+
+        let (active_termcolor, active_aicolor) = if self.get_command_mode() {
+            (cmdmode_color, cmdmode_color)
         } else {
-            "RustyTerm".to_string()
+            (
+                term_status.border_color.unwrap_or(default_term_color),
+                ai_status.border_color.unwrap_or(default_ai_color),
+            )
         };
+
+        // Build terminal title with status from component
+        let term_title = build_pane_title("RustyTerm", &term_status.title_status);
         let block_term = Block::default()
             .title(term_title)
             .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT)
@@ -51,20 +63,29 @@ impl Widget for &App {
         // Render terminal pane
         self.tui_terminal.render(term_area, buf);
 
-
+        // Determine separator style
         let side = match active {
             _ if self.get_command_mode() => ActiveSide::None(cmdmode_color),
-            ActivePane::Terminal => ActiveSide::Left(active_termcolor),
-            ActivePane::Assistant => ActiveSide::Right(active_aicolor),
+            ActivePane::Terminal => {
+                if term_status.border_color.is_some() {
+                    ActiveSide::None(active_termcolor)
+                } else {
+                    ActiveSide::Left(active_termcolor)
+                }
+            }
+            ActivePane::Assistant => {
+                if ai_status.border_color.is_some() {
+                    ActiveSide::None(active_aicolor)
+                } else {
+                    ActiveSide::Right(active_aicolor)
+                }
+            }
         };
         // Render separator
         render_separator(layout.separator_area, buf, side, line::Set::default());
 
-        let ai_title = if self.tui_assistant.is_scrolled() {
-            format!("Assistant [Scrolled ↑{}]", self.tui_assistant.scroll_offset())
-        } else {
-            "Assistant".to_string()
-        };
+        // Build assistant title with status from component
+        let ai_title = build_pane_title("Assistant", &ai_status.title_status);
         let block_ai = Block::default()
             .title(ai_title)
             .borders(Borders::TOP | Borders::BOTTOM | Borders::RIGHT)
@@ -73,32 +94,53 @@ impl Widget for &App {
         // Render assistant pane
         self.tui_assistant.render(ai_area, buf);
 
-        // Render blocks
-        let hint = " Ctrl + B: Enter Command Mode ";
+        // Determine bottom hint from active pane's status
+        let (hint, hint_color) = match active {
+            ActivePane::Terminal => {
+                let hint = term_status.hint_text.unwrap_or(" Ctrl + B: Enter Command Mode ");
+                (hint, active_termcolor)
+            }
+            ActivePane::Assistant => {
+                let hint = ai_status.hint_text.unwrap_or(" Ctrl + B: Enter Command Mode ");
+                (hint, active_aicolor)
+            }
+        };
+
         let (block_term, block_ai) = match active {
             _ if self.get_command_mode() => (block_term, block_ai),
-            ActivePane::Terminal => (block_term.title_bottom(hint.fg(Color::Black).bg(active_termcolor)), block_ai),
-            ActivePane::Assistant => (block_term, block_ai.title_bottom(hint.fg(Color::Black).bg(active_aicolor))),
+            ActivePane::Terminal => (block_term.title_bottom(hint.fg(Color::Black).bg(hint_color)), block_ai),
+            ActivePane::Assistant => (block_term, block_ai.title_bottom(hint.fg(Color::Black).bg(hint_color))),
         };
 
         block_term.render(layout.terminal_area, buf);
         render_separator(layout.separator_area, buf, side, line::Set::default());
         block_ai.render(layout.assistant_area, buf);
-        // Render separator
+
+        // Render command mode popup if active
         if self.get_command_mode() {
             let extra_hints: Vec<(String, String)> = match active {
                 ActivePane::Terminal => vec![
                     (" ^B".into(), "Send ^B to shell".into()),
+                    (" V".into(), "Enter Visual mode".into()),
                 ],
                 ActivePane::Assistant => vec![
                     (" T".into(), "New session".into()),
                     (" W".into(), "Close session".into()),
                     (" ]".into(), "Next session".into()),
                     (" [".into(), "Previous session".into()),
+                    (" V".into(), "Enter Visual mode".into()),
                 ],
             };
             render_command_mode_hint(area, buf, cmdmode_color, extra_hints);
         }
+    }
+}
+
+/// Build a pane title with optional status suffix.
+fn build_pane_title(base_name: &str, status: &Option<String>) -> String {
+    match status {
+        Some(s) => format!("{} [{}]", base_name, s),
+        None => base_name.to_string(),
     }
 }
 

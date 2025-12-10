@@ -15,8 +15,11 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 use std::cell::Cell;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
 use crate::ai::session::SessionId;
 use crate::event::AiUiUpdate;
+use super::visual::{VisualState, SelectionMode, PaneStatus, KeyHandleResult, copy_to_clipboard, is_in_selection_with_mode};
 
 // ============================================================================
 // Data Structures
@@ -95,6 +98,15 @@ pub struct TuiAssistant {
 
     // Cached max scroll offset (updated during render)
     max_scroll_offset: Cell<usize>,
+
+    // Visual mode state
+    visual_state: Option<VisualState>,
+
+    // Cached total lines for visual mode (updated during render)
+    cached_total_lines: Cell<usize>,
+
+    // Cached visible width for visual mode
+    cached_visible_width: Cell<usize>,
 }
 
 impl TuiAssistant {
@@ -135,6 +147,9 @@ impl TuiAssistant {
             pending_command_idx: None,
             last_input_area_width: Cell::new(80), // Default value
             max_scroll_offset: Cell::new(0),
+            visual_state: None,
+            cached_total_lines: Cell::new(0),
+            cached_visible_width: Cell::new(80),
         }
     }
 
@@ -449,6 +464,526 @@ impl TuiAssistant {
         } else {
             false
         }
+    }
+
+    // ========================================================================
+    // Visual Mode
+    // ========================================================================
+
+    /// Check if visual mode is active.
+    pub fn is_visual_mode(&self) -> bool {
+        self.visual_state.is_some()
+    }
+
+    /// Check if visual selection is active.
+    pub fn is_visual_selecting(&self) -> bool {
+        self.visual_state.as_ref().map_or(false, |s| s.is_selecting())
+    }
+
+    /// Get visual selection mode.
+    pub fn get_visual_selection_mode(&self) -> Option<SelectionMode> {
+        self.visual_state.as_ref().map(|s| s.get_selection_mode())
+    }
+
+    /// Get visual state reference.
+    pub fn visual_state(&self) -> Option<&VisualState> {
+        self.visual_state.as_ref()
+    }
+
+    /// Enter visual mode.
+    /// Initializes the cursor at the bottom-left of the visible message area.
+    pub fn enter_visual_mode(&mut self) {
+        // If never rendered, place cursor at row 0
+        let cached_width = self.cached_visible_width.get();
+        if cached_width == 0 {
+            self.visual_state = Some(VisualState::new(0, 0));
+            return;
+        }
+
+        // Compute total_lines fresh to avoid stale cache issues
+        // (cached_total_lines is only updated during render)
+        let all_lines = self.build_rendered_lines(cached_width as u16);
+        let total_lines = all_lines.len();
+
+        // Calculate initial cursor position
+        // Use the bottom of visible area, or if no messages, row 0
+        let row = if total_lines == 0 {
+            0
+        } else {
+            // Calculate visible bottom in content coordinates
+            let visible_bottom = total_lines.saturating_sub(1).saturating_sub(self.scroll_offset);
+            visible_bottom.min(total_lines.saturating_sub(1))
+        };
+
+        self.visual_state = Some(VisualState::new(row, 0));
+    }
+
+    /// Exit visual mode.
+    pub fn exit_visual_mode(&mut self) {
+        self.visual_state = None;
+    }
+
+    /// Move visual cursor by delta.
+    /// If cursor moves out of visible area, auto-scroll to keep it visible.
+    pub fn move_visual_cursor(&mut self, delta_row: i32, delta_col: i32) {
+        let Some(ref mut visual) = self.visual_state else {
+            return;
+        };
+
+        let total_lines = self.cached_total_lines.get();
+        let max_col = self.cached_visible_width.get().saturating_sub(1);
+        let max_row = total_lines.saturating_sub(1);
+
+        // Move cursor
+        visual.move_cursor(delta_row, delta_col, max_row, max_col);
+
+        // Auto-scroll to keep cursor in view
+        self.scroll_to_visual_cursor();
+    }
+
+    /// Scroll viewport to ensure visual cursor is visible.
+    fn scroll_to_visual_cursor(&mut self) {
+        let Some(ref visual) = self.visual_state else {
+            return;
+        };
+
+        let total_lines = self.cached_total_lines.get();
+        let max_scroll = self.max_scroll_offset.get();
+
+        if total_lines == 0 {
+            return;
+        }
+
+        let (cursor_row, _) = visual.cursor;
+
+        // Calculate visible height (approximation)
+        let visible_height = total_lines.saturating_sub(max_scroll);
+        if visible_height == 0 {
+            return;
+        }
+
+        // Calculate visible range in content coordinates
+        // scroll_offset = 0 means showing the bottom (most recent)
+        // scroll_offset = max_scroll means showing the top (oldest)
+        let visible_bottom = total_lines.saturating_sub(1).saturating_sub(self.scroll_offset);
+        let visible_top = visible_bottom.saturating_sub(visible_height.saturating_sub(1));
+
+        // Adjust scroll if cursor is out of visible range
+        if cursor_row < visible_top {
+            // Cursor is above visible area, scroll up
+            let new_offset = total_lines.saturating_sub(1).saturating_sub(cursor_row).saturating_sub(visible_height.saturating_sub(1));
+            self.scroll_offset = new_offset.min(max_scroll);
+        } else if cursor_row > visible_bottom {
+            // Cursor is below visible area, scroll down
+            self.scroll_offset = total_lines.saturating_sub(1).saturating_sub(cursor_row);
+        }
+    }
+
+    /// Cycle visual selection mode: None -> Line -> Block -> None
+    pub fn cycle_visual_selection(&mut self) {
+        if let Some(ref mut visual) = self.visual_state {
+            visual.cycle_selection_mode();
+        }
+    }
+
+    /// Clear visual selection (keep cursor position, reset to None mode).
+    pub fn clear_visual_selection(&mut self) {
+        if let Some(ref mut visual) = self.visual_state {
+            visual.clear_selection();
+        }
+    }
+
+    /// Copy selected text to clipboard and return true if successful.
+    /// Line mode: trims trailing spaces from each line.
+    /// Block mode: preserves all characters in the rectangle.
+    pub fn copy_visual_selection(&mut self) -> bool {
+        let Some(ref visual) = self.visual_state else {
+            return false;
+        };
+
+        let mode = visual.get_selection_mode();
+        let Some(((start_row, start_col), (end_row, end_col))) = visual.selection_range() else {
+            return false;
+        };
+
+        // We need to extract text from the rendered lines
+        let text = self.get_text_range(start_row, start_col, end_row, end_col, mode);
+        if text.is_empty() {
+            return false;
+        }
+
+        copy_to_clipboard(&text)
+    }
+
+    // ========================================================================
+    // Pane Status API (for App to query rendering info)
+    // ========================================================================
+
+    /// Get pane status for rendering title bar and hints.
+    /// This allows the component to control its appearance without exposing internal state.
+    pub fn get_pane_status(&self) -> PaneStatus {
+        let mut status_parts: Vec<String> = Vec::new();
+
+        if self.is_visual_mode() {
+            if let Some(mode) = self.get_visual_selection_mode() {
+                if let Some(name) = mode.display_name() {
+                    status_parts.push(name.to_string());
+                } else {
+                    status_parts.push("VISUAL".to_string());
+                }
+            } else {
+                status_parts.push("VISUAL".to_string());
+            }
+
+            // Show repeat count if being accumulated
+            if let Some(ref visual) = self.visual_state {
+                if let Some(count) = visual.get_repeat_count() {
+                    status_parts.push(format!("{}×", count));
+                }
+            }
+        }
+
+        if self.is_scrolled() {
+            status_parts.push(format!("Scrolled ↑{}", self.scroll_offset));
+        }
+
+        let title_status = if status_parts.is_empty() {
+            None
+        } else {
+            Some(status_parts.join(" "))
+        };
+
+        let hint_text = if self.is_visual_mode() {
+            Some(" ESC: Exit | Space: Select | y: Copy | hjkl: Move ")
+        } else {
+            None
+        };
+
+        let border_color = if self.is_visual_mode() {
+            Some(Color::Magenta)
+        } else {
+            None
+        };
+
+        PaneStatus {
+            title_status,
+            hint_text,
+            border_color,
+        }
+    }
+
+    /// Handle a key event when in visual mode.
+    /// Returns KeyHandleResult indicating how the key was processed.
+    pub fn handle_visual_key(&mut self, key: KeyEvent) -> KeyHandleResult {
+        if !matches!(key.kind, KeyEventKind::Press) {
+            return KeyHandleResult::NotConsumed;
+        }
+
+        // If not in visual mode, don't consume
+        let Some(ref mut visual) = self.visual_state else {
+            return KeyHandleResult::NotConsumed;
+        };
+
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // Ctrl+B => Request command mode
+        if ctrl && matches!(key.code, KeyCode::Char('b') | KeyCode::Char('B')) {
+            visual.clear_repeat_count();
+            return KeyHandleResult::RequestCommandMode;
+        }
+
+        match key.code {
+            // Digit keys for repeat count
+            KeyCode::Char(c @ '1'..='9') => {
+                let digit = c.to_digit(10).unwrap_or(0) as usize;
+                visual.accumulate_repeat_digit(digit);
+                return KeyHandleResult::Consumed;
+            }
+            KeyCode::Char('0') if visual.has_repeat_count() => {
+                visual.accumulate_repeat_digit(0);
+                return KeyHandleResult::Consumed;
+            }
+
+            // Escape => if in selection mode, go back to VISUAL; if in VISUAL, exit
+            KeyCode::Esc => {
+                if visual.is_selecting() {
+                    // In Line/Block mode, go back to None (VISUAL) mode
+                    visual.clear_selection();
+                } else {
+                    // Already in None mode, exit visual mode
+                    self.visual_state = None;
+                }
+            }
+
+            // Space => toggle selection mode: None -> Line, then Line <-> Block
+            KeyCode::Char(' ') => {
+                visual.cycle_selection_mode();
+            }
+
+            // y => copy selected text and clear selection
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let _ = self.copy_visual_selection();
+                if let Some(ref mut v) = self.visual_state {
+                    v.clear_selection();
+                }
+            }
+
+            // Scroll keys (Shift + arrows) - scroll without moving cursor
+            KeyCode::Up if shift => {
+                let repeat = visual.take_repeat_count();
+                for _ in 0..repeat {
+                    self.scroll(-1);
+                }
+            }
+            KeyCode::Down if shift => {
+                let repeat = visual.take_repeat_count();
+                for _ in 0..repeat {
+                    self.scroll(1);
+                }
+            }
+            KeyCode::PageUp => {
+                let repeat = visual.take_repeat_count();
+                self.scroll(-(repeat as i16 * 10));
+            }
+            KeyCode::PageDown => {
+                let repeat = visual.take_repeat_count();
+                self.scroll(repeat as i16 * 10);
+            }
+
+            // Cursor movement keys (hjkl and arrows)
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H') => {
+                let repeat = visual.take_repeat_count();
+                for _ in 0..repeat {
+                    self.move_visual_cursor(0, -1);
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                let repeat = visual.take_repeat_count();
+                for _ in 0..repeat {
+                    self.move_visual_cursor(0, 1);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                let repeat = visual.take_repeat_count();
+                for _ in 0..repeat {
+                    self.move_visual_cursor(-1, 0);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                let repeat = visual.take_repeat_count();
+                for _ in 0..repeat {
+                    self.move_visual_cursor(1, 0);
+                }
+            }
+
+            _ => {
+                // Unknown key in visual mode - clear repeat count but consume
+                if let Some(ref mut v) = self.visual_state {
+                    v.clear_repeat_count();
+                }
+            }
+        }
+
+        KeyHandleResult::Consumed
+    }
+
+    /// Get text from a range in rendered line coordinates.
+    /// Get text from a range in content coordinates.
+    /// Line mode: trims trailing spaces from each line.
+    /// Block mode: extracts exact rectangle, preserves spaces.
+    fn get_text_range(&self, start_row: usize, start_col: usize, end_row: usize, end_col: usize, mode: SelectionMode) -> String {
+        // Build all rendered lines (similar to render_message_list)
+        let width = self.cached_visible_width.get() as u16;
+        if width == 0 {
+            return String::new();
+        }
+
+        let all_lines = self.build_rendered_lines(width);
+
+        let mut result = String::new();
+
+        for row in start_row..=end_row {
+            if row >= all_lines.len() {
+                break;
+            }
+
+            let line = &all_lines[row];
+            let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let chars: Vec<char> = line_text.chars().collect();
+            let line_len = chars.len();
+
+            // Determine column range based on mode
+            let (col_start, col_end) = match mode {
+                SelectionMode::None => continue,
+                SelectionMode::Line => {
+                    // Line mode: clamp to line length
+                    let cs = if row == start_row { start_col } else { 0 };
+                    let ce = if row == end_row {
+                        end_col.min(line_len.saturating_sub(1))
+                    } else {
+                        line_len.saturating_sub(1)
+                    };
+                    (cs, ce)
+                }
+                SelectionMode::Block => {
+                    // Block mode: use exact rectangle columns
+                    (start_col, end_col.min(line_len.saturating_sub(1)))
+                }
+            };
+
+            // Extract characters from this line
+            if col_start < line_len {
+                let actual_end = col_end.min(line_len.saturating_sub(1));
+                if col_start <= actual_end {
+                    let line_slice: String = chars[col_start..=actual_end].iter().collect();
+                    // For Line mode, trim trailing whitespace
+                    // For Block mode, preserve as-is
+                    let final_text = match mode {
+                        SelectionMode::Line => line_slice.trim_end().to_string(),
+                        SelectionMode::Block | SelectionMode::None => line_slice,
+                    };
+                    result.push_str(&final_text);
+                }
+            }
+
+            // Add newline between lines (but not after the last line)
+            if row < end_row {
+                result.push('\n');
+            }
+        }
+
+        result
+    }
+
+
+    /// Build rendered lines for text extraction (used by visual mode).
+    fn build_rendered_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut all_lines: Vec<Line<'static>> = Vec::new();
+
+        for msg in &self.messages {
+            match msg {
+                ChatMessage::User { text } => {
+                    let wrapped = wrap_text_lines(text, width, "You: ");
+                    for (i, line) in wrapped.into_iter().enumerate() {
+                        if i == 0 {
+                            let line_str = line.to_string();
+                            let content = line_str.trim_start_matches("You: ").to_string();
+                            all_lines.push(Line::from(vec![
+                                Span::styled("You: ", Style::default().fg(Color::Green).bold()),
+                                Span::raw(content),
+                            ]));
+                        } else {
+                            all_lines.push(line);
+                        }
+                    }
+                    all_lines.push(Line::raw(""));
+                }
+                ChatMessage::Assistant { text, is_streaming } => {
+                    let content = if *is_streaming && text.is_empty() {
+                        "...".to_string()
+                    } else if *is_streaming {
+                        format!("{}▌", text)
+                    } else {
+                        text.clone()
+                    };
+
+                    let wrapped = wrap_text_lines(&content, width, "AI: ");
+                    for (i, line) in wrapped.into_iter().enumerate() {
+                        if i == 0 {
+                            let line_str = line.to_string();
+                            let content = line_str.trim_start_matches("AI: ").to_string();
+                            all_lines.push(Line::from(vec![
+                                Span::styled("AI: ", Style::default().fg(Color::Cyan).bold()),
+                                Span::raw(content),
+                            ]));
+                        } else {
+                            all_lines.push(line);
+                        }
+                    }
+                    if !text.is_empty() || *is_streaming {
+                        all_lines.push(Line::raw(""));
+                    }
+                }
+                ChatMessage::CommandCard {
+                    command,
+                    explanation,
+                    status,
+                } => {
+                    all_lines.extend(render_command_card(command, explanation, *status, width));
+                    all_lines.push(Line::raw(""));
+                }
+                ChatMessage::Error { text } => {
+                    let wrapped = wrap_text_lines(text, width, "⚠ ");
+                    for (i, line) in wrapped.into_iter().enumerate() {
+                        if i == 0 {
+                            let line_str = line.to_string();
+                            let content = line_str.trim_start_matches("⚠ ").to_string();
+                            all_lines.push(Line::from(vec![
+                                Span::styled("⚠ ", Style::default().fg(Color::Red).bold()),
+                                Span::styled(content, Style::default().fg(Color::Red)),
+                            ]));
+                        } else {
+                            all_lines.push(Line::styled(
+                                line.to_string(),
+                                Style::default().fg(Color::Red),
+                            ));
+                        }
+                    }
+                    all_lines.push(Line::raw(""));
+                }
+            }
+        }
+
+        all_lines
+    }
+
+    /// Get visual cursor position in screen coordinates (for rendering).
+    /// Returns (screen_row, screen_col) if cursor is visible, None otherwise.
+    pub fn get_visual_cursor_screen_pos(&self) -> Option<(usize, usize)> {
+        let visual = self.visual_state.as_ref()?;
+        let (cursor_row, cursor_col) = visual.cursor;
+
+        let total_lines = self.cached_total_lines.get();
+        let max_scroll = self.max_scroll_offset.get();
+
+        if total_lines == 0 {
+            return Some((0, cursor_col));
+        }
+
+        // Calculate visible height
+        let visible_height = total_lines.saturating_sub(max_scroll);
+        if visible_height == 0 {
+            return None;
+        }
+
+        // Calculate visible range
+        let visible_bottom = total_lines.saturating_sub(1).saturating_sub(self.scroll_offset);
+        let visible_top = visible_bottom.saturating_sub(visible_height.saturating_sub(1));
+
+        // Check if cursor is in visible range
+        if cursor_row >= visible_top && cursor_row <= visible_bottom {
+            let screen_row = cursor_row - visible_top;
+            Some((screen_row, cursor_col))
+        } else {
+            None
+        }
+    }
+
+    /// Convert screen row to content row for selection checking.
+    fn screen_row_to_content_row(&self, screen_row: usize) -> usize {
+        let total_lines = self.cached_total_lines.get();
+        let max_scroll = self.max_scroll_offset.get();
+
+        if total_lines == 0 {
+            return 0;
+        }
+
+        let visible_height = total_lines.saturating_sub(max_scroll);
+        let visible_bottom = total_lines.saturating_sub(1).saturating_sub(self.scroll_offset);
+        let visible_top = visible_bottom.saturating_sub(visible_height.saturating_sub(1));
+
+        visible_top + screen_row
     }
 
     /// Calculate the number of lines needed to display the input text.
@@ -1153,8 +1688,10 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
     // Clamp scroll_offset to valid range
     let max_scroll = total_lines.saturating_sub(visible_lines);
 
-    // Cache max_scroll for scroll limiting
+    // Cache values for visual mode
     assistant.max_scroll_offset.set(max_scroll);
+    assistant.cached_total_lines.set(total_lines);
+    assistant.cached_visible_width.set(area.width as usize);
 
     let effective_scroll = assistant.scroll_offset.min(max_scroll);
 
@@ -1162,11 +1699,97 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
     // When scroll_offset = 0, we show the last N lines (at bottom)
     // When scroll_offset = max, we show the first N lines (at top)
     let skip = total_lines.saturating_sub(visible_lines + effective_scroll);
+
+    // Get visual mode state for highlighting
+    let visual_cursor_pos = assistant.get_visual_cursor_screen_pos();
+    let selection_range = assistant.visual_state.as_ref().and_then(|v| v.selection_range());
+    let selection_mode = assistant.visual_state.as_ref().map(|v| v.get_selection_mode()).unwrap_or(SelectionMode::None);
+
+    // Render with visual mode support
     let visible: Vec<Line> = all_lines.into_iter().skip(skip).take(visible_lines).collect();
 
-    // Render without wrap since we already handled wrapping manually
-    let paragraph = Paragraph::new(visible);
-    paragraph.render(area, buf);
+    // Build line widths for selection clamping (for Line mode)
+    // We collect the effective width (trimmed) for each visible line's content row
+    let line_widths: Vec<usize> = visible.iter().map(|line| {
+        let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        line_text.trim_end().chars().count()
+    }).collect();
+
+    // Render lines with visual mode highlighting
+    for (screen_row, line) in visible.iter().enumerate() {
+        if screen_row >= area.height as usize {
+            break;
+        }
+
+        let y = area.y + screen_row as u16;
+        let mut x = area.x;
+        let mut col: usize = 0;
+
+        for span in &line.spans {
+            for c in span.content.chars() {
+                if x >= area.x + area.width {
+                    break;
+                }
+
+                let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1) as u16;
+
+                // Determine style with visual mode modifications
+                let mut style = span.style;
+
+                // Check if this cell is the visual cursor
+                let is_cursor = visual_cursor_pos.map_or(false, |(cr, cc)| cr == screen_row && cc == col);
+
+                // Check if this cell is in the selection range
+                let is_selected = selection_range.map_or(false, |(start, end)| {
+                    let content_row = assistant.screen_row_to_content_row(screen_row);
+                    is_in_selection_with_mode(
+                        content_row,
+                        col,
+                        start,
+                        end,
+                        selection_mode,
+                        |r| {
+                            // Map content row to screen row to get the line width
+                            let visible_top = total_lines.saturating_sub(visible_lines + effective_scroll);
+                            if r >= visible_top && r < visible_top + line_widths.len() {
+                                line_widths[r - visible_top]
+                            } else {
+                                // Row not in visible area, use cached width as fallback
+                                assistant.cached_visible_width.get()
+                            }
+                        },
+                    )
+                });
+
+                if is_cursor {
+                    // Visual cursor: blue background, white foreground
+                    style = Style::default().fg(Color::White).bg(Color::Blue);
+                } else if is_selected {
+                    // Selection: blue background, white foreground
+                    style = Style::default().fg(Color::White).bg(Color::Blue);
+                }
+
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_char(c).set_style(style);
+                }
+                x += char_width;
+                col += 1;
+            }
+        }
+
+        // If cursor is on this row but beyond the rendered content, render it
+        if let Some((cursor_row, cursor_col)) = visual_cursor_pos {
+            if cursor_row == screen_row && cursor_col >= col {
+                let cursor_x = area.x + cursor_col as u16;
+                if cursor_x < area.x + area.width {
+                    let style = Style::default().fg(Color::White).bg(Color::Blue);
+                    if let Some(cell) = buf.cell_mut((cursor_x, y)) {
+                        cell.set_char(' ').set_style(style);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Render a command suggestion card
@@ -1176,6 +1799,8 @@ fn render_command_card(
     status: CommandStatus,
     width: u16,
 ) -> Vec<Line<'static>> {
+    // TODO: the explanation could contains more than one single line,
+    //       but now it only renders one line.
     let mut lines = Vec::new();
 
     // Card border style based on status

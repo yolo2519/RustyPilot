@@ -124,6 +124,23 @@ impl App {
         self.command_mode = !self.command_mode;
     }
 
+    /// Check if the active pane is in visual mode.
+    /// Visual mode state is owned by each component, App just queries it.
+    pub fn is_visual_mode(&self) -> bool {
+        match self.active_pane {
+            ActivePane::Terminal => self.tui_terminal.is_visual_mode(),
+            ActivePane::Assistant => self.tui_assistant.is_visual_mode(),
+        }
+    }
+
+    /// Enter visual mode for the active pane.
+    pub fn enter_visual_mode(&mut self) {
+        match self.active_pane {
+            ActivePane::Terminal => self.tui_terminal.enter_visual_mode(),
+            ActivePane::Assistant => self.tui_assistant.enter_visual_mode(),
+        }
+    }
+
     /// Get current layout
     pub fn layout(&self) -> &AppLayout {
         &self.layout
@@ -258,15 +275,17 @@ impl App {
     }
 
     fn update_cursor_position(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        // Directly match on app state and use layout areas
-        match (self.get_active_pane(), self.get_command_mode()) {
-            // Command mode: hide cursor
-            (_, true) => {
-                terminal.hide_cursor()?;
-            }
+        // In visual mode or command mode, hide the hardware cursor
+        // (visual mode cursor is rendered as a highlighted cell)
+        if self.get_command_mode() || self.is_visual_mode() {
+            terminal.hide_cursor()?;
+            return Ok(());
+        }
 
+        // Directly match on app state and use layout areas
+        match self.get_active_pane() {
             // Terminal pane active: show cursor at terminal position
-            (ActivePane::Terminal, false) => {
+            ActivePane::Terminal => {
                 let term_area = self.layout.terminal_inner;
                 let (cursor_row, cursor_col) = self.tui_terminal.cursor_position();
                 let cursor_x = term_area.x + cursor_col;
@@ -277,7 +296,7 @@ impl App {
             }
 
             // Assistant pane active: show cursor at assistant input position
-            (ActivePane::Assistant, false) => {
+            ActivePane::Assistant => {
                 let ai_area = self.layout.assistant_inner;
 
                 // Calculate the dynamic input box height
@@ -312,6 +331,24 @@ impl App {
             self.handle_command_mode_events(event)?;
             return Ok(());
         }
+
+        // Handle visual mode events (delegated to component)
+        if self.is_visual_mode() {
+            if let UserEvent::Key(key) = event {
+                let result = match self.active_pane {
+                    ActivePane::Terminal => self.tui_terminal.handle_visual_key(key),
+                    ActivePane::Assistant => self.tui_assistant.handle_visual_key(key),
+                };
+                match result {
+                    crate::ui::visual::KeyHandleResult::RequestCommandMode => {
+                        self.set_command_mode(true);
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(());
+        }
+
         match event {
             UserEvent::Key(key_evt) if matches!(key_evt.kind, KeyEventKind::Press) => {
                 // Ctrl + B => Command Mode
@@ -367,6 +404,13 @@ impl App {
                 return Ok(());
             }
 
+            // v => enter visual mode
+            UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('v') | KeyCode::Char('V')) => {
+                self.set_command_mode(false);
+                self.enter_visual_mode();
+                return Ok(());
+            }
+
             _ => {}
         }
 
@@ -391,6 +435,7 @@ impl App {
         self.set_command_mode(false);
         Ok(())
     }
+
 }
 
 impl App {
