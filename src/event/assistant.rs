@@ -25,16 +25,27 @@ pub fn handle_key_event(
 ) -> Result<()> {
     let session_id = assistant.active_session_id();
 
-    // Check for pending command confirmation first (Ctrl+Y / Ctrl+N shortcuts)
+    // Check for pending command confirmation first (Ctrl+Y / Ctrl+N / Ctrl+/ shortcuts)
     // Use ai_sessions as the authoritative source for pending suggestions
     if ai_sessions.has_pending_suggestion(session_id) {
         match key_evt.code {
+            // Ctrl+A => Cycle to next command suggestion
+            KeyCode::Char('a') | KeyCode::Char('A')
+                if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                assistant.cycle_suggestion();
+                return Ok(());
+            }
+
+            // Ctrl+Y => Execute the currently displayed command
             KeyCode::Char('y') | KeyCode::Char('Y')
                 if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                // Update backend state first (marks suggestion as Accepted)
-                // accept_suggestion returns the command string
-                if let Some(command) = ai_sessions.accept_suggestion(session_id) {
+                // Get the index of the currently displayed suggestion
+                let pending_idx = assistant.current_suggestion_index();
+
+                // Update backend state (marks selected as Accepted, others as Ignored)
+                if let Some(command) = ai_sessions.accept_suggestion(session_id, pending_idx) {
                     // Update UI to show command as executed
                     assistant.confirm_command();
 
@@ -45,10 +56,12 @@ pub fn handle_key_event(
 
                 return Ok(());
             }
+
+            // Ctrl+N => Reject all command suggestions
             KeyCode::Char('n') | KeyCode::Char('N')
                 if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                // Update backend state first (marks suggestion as Rejected)
+                // Update backend state first (marks all suggestions as Rejected)
                 ai_sessions.reject_suggestion(session_id);
                 // Update UI
                 assistant.reject_command();

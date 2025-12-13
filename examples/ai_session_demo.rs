@@ -134,11 +134,13 @@ async fn main() -> Result<()> {
                             println!("\n✗ Error: {}\n", error);
                             stream_ended = true;
                         }
-                        AiUiUpdate::CommandSuggestion { command, explanation, .. } => {
+                        AiUiUpdate::CommandSuggestion { commands, .. } => {
                             println!("\n");
-                            println!("--- Command Suggestion ---");
-                            println!("  Command: {}", command);
-                            println!("  Explanation: {}", explanation);
+                            println!("--- Command Suggestions ({}) ---", commands.len());
+                            for (i, (cmd, exp)) in commands.iter().enumerate() {
+                                println!("  [{}] Command: {}", i + 1, cmd);
+                                println!("      Explanation: {}", exp);
+                            }
                             println!();
                             stream_ended = true;
                         }
@@ -166,30 +168,41 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Show suggestion if available (from the session manager)
-        if let Some(suggestion) = session_manager.get_pending_suggestion(session_id) {
-            println!("--- Pending Suggestion ---");
-            println!("  Command: {}", suggestion.command);
-            println!("  Explanation: {}", suggestion.explanation);
-            println!("  Status: {:?}", suggestion.status);
+        // Show suggestions if available (from the session manager)
+        let pending = session_manager.get_pending_suggestions(session_id);
+        if !pending.is_empty() {
+            println!("--- Pending Suggestions ({}) ---", pending.len());
+            for (i, (cmd, exp)) in pending.iter().enumerate() {
+                println!("  [{}] Command: {}", i + 1, cmd);
+                println!("      Explanation: {}", exp);
+            }
             println!();
 
-            // Demo: Ask user to accept or reject
-            print!("Accept this suggestion? (y/n): ");
+            // Demo: Ask user which to accept (or reject all)
+            print!("Enter number to accept (1-{}), or 'n' to reject all: ", pending.len());
             io::stdout().flush()?;
             let mut response = String::new();
             io::stdin().read_line(&mut response)?;
             let response = response.trim().to_lowercase();
 
-            if response == "y" || response == "yes" {
-                if let Some(cmd) = session_manager.accept_suggestion(session_id) {
-                    println!("✓ Accepted command: {}", cmd);
-                    // In real app, would execute the command here
-                    session_manager.execute_suggestion(session_id, cmd)?;
+            if response == "n" || response == "no" {
+                session_manager.reject_suggestion(session_id);
+                println!("✗ Rejected all suggestions");
+            } else if let Ok(choice) = response.parse::<usize>() {
+                if choice >= 1 && choice <= pending.len() {
+                    let pending_idx = choice - 1;
+                    if let Some(cmd) = session_manager.accept_suggestion(session_id, pending_idx) {
+                        println!("✓ Accepted command: {}", cmd);
+                        // In real app, would execute the command here
+                        session_manager.execute_suggestion(session_id, cmd)?;
+                    }
+                } else {
+                    println!("✗ Invalid choice, rejecting all");
+                    session_manager.reject_suggestion(session_id);
                 }
             } else {
+                println!("✗ Invalid input, rejecting all");
                 session_manager.reject_suggestion(session_id);
-                println!("✗ Rejected suggestion");
             }
             println!();
         }
