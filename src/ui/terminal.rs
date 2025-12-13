@@ -3,7 +3,7 @@
 //! This module uses alacritty_terminal for robust terminal emulation with support
 //! for proper resize handling (with scrollback preservation via reflow).
 
-use alacritty_terminal::term::{Term, Config};
+use alacritty_terminal::term::{Term, Config, TermMode};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line as TermLine};
@@ -220,6 +220,34 @@ impl TuiTerminal {
     }
 
     // ========================================================================
+    // Mouse Mode Detection
+    // ========================================================================
+
+    /// Check if the terminal program has enabled mouse mode.
+    ///
+    /// When true, mouse events should be forwarded to the PTY instead of
+    /// being handled by the TUI (e.g., for visual selection).
+    ///
+    /// This uses alacritty_terminal's TermMode API which automatically tracks
+    /// mouse mode enable/disable sequences (ESC[?1000h, ESC[?1002h, etc.).
+    ///
+    /// Note: We use `intersects` instead of `contains` because programs like
+    /// tmux may only enable some mouse modes (e.g., MOUSE_REPORT_CLICK) without
+    /// enabling all of them (MOUSE_MOTION, MOUSE_DRAG).
+    pub fn is_mouse_mode_enabled(&self) -> bool {
+        self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// Check if SGR extended mouse mode is enabled.
+    ///
+    /// This determines the encoding format for mouse events sent to the PTY.
+    /// SGR mode (ESC[?1006h) supports coordinates > 223 and distinguishes
+    /// button press from release.
+    pub fn is_sgr_mouse_mode(&self) -> bool {
+        self.term.mode().contains(TermMode::SGR_MOUSE)
+    }
+
+    // ========================================================================
     // Visual Mode
     // ========================================================================
 
@@ -329,6 +357,174 @@ impl TuiTerminal {
         if let Some(ref mut visual) = self.visual_state {
             visual.cycle_selection_mode();
         }
+    }
+
+    /// Set visual cursor position from screen-relative coordinates.
+    ///
+    /// This is used for mouse-based cursor positioning. The coordinates are
+    /// relative to the terminal inner area (0,0 is top-left of visible content).
+    ///
+    /// # Arguments
+    /// * `screen_row` - Row in the visible area (0 = top of visible content)
+    /// * `screen_col` - Column in the visible area
+    pub fn set_visual_cursor_from_screen(&mut self, screen_row: usize, screen_col: usize) {
+        let Some(ref mut visual) = self.visual_state else {
+            return;
+        };
+
+        let grid = self.term.grid();
+        let history_size = grid.history_size();
+        let screen_lines = grid.screen_lines();
+        let columns = grid.columns();
+        let total_lines = history_size + screen_lines;
+
+        // Convert screen row to content row
+        // visible_top is the content row at the top of the visible area
+        let visible_bottom = total_lines.saturating_sub(1).saturating_sub(self.scroll_offset);
+        let visible_top = visible_bottom.saturating_sub(screen_lines.saturating_sub(1));
+
+        let content_row = visible_top + screen_row;
+        let content_col = screen_col.min(columns.saturating_sub(1));
+
+        // Clamp to valid range
+        let content_row = content_row.min(total_lines.saturating_sub(1));
+
+        visual.set_cursor(content_row, content_col);
+    }
+
+    /// Start visual selection at current cursor position.
+    ///
+    /// This enters Line selection mode and sets the anchor to the current cursor.
+    /// Used when starting mouse-based selection.
+    pub fn start_visual_selection(&mut self) {
+        if let Some(ref mut visual) = self.visual_state {
+            // If not already selecting, start selection
+            if !visual.is_selecting() {
+                visual.cycle_selection_mode(); // None -> Line
+            }
+        }
+    }
+
+    /// Select the word at the given screen position.
+    ///
+    /// This finds word boundaries and sets both anchor and cursor to select the word.
+    ///
+    /// # Arguments
+    /// * `screen_row` - Row in the visible area (0 = top of visible content)
+    /// * `screen_col` - Column in the visible area
+    pub fn select_word_at(&mut self, screen_row: usize, screen_col: usize) {
+        let grid = self.term.grid();
+        let history_size = grid.history_size();
+        let screen_lines = grid.screen_lines();
+        let columns = grid.columns();
+        let total_lines = history_size + screen_lines;
+
+        // Convert screen row to content row
+        let visible_bottom = total_lines.saturating_sub(1).saturating_sub(self.scroll_offset);
+        let visible_top = visible_bottom.saturating_sub(screen_lines.saturating_sub(1));
+        let content_row = (visible_top + screen_row).min(total_lines.saturating_sub(1));
+        let col = screen_col.min(columns.saturating_sub(1));
+
+        // Get the line content
+        let grid_line_idx = content_row as i32 - history_size as i32;
+        let line = TermLine(grid_line_idx);
+
+        // Find word boundaries
+        let (word_start, word_end) = self.find_word_boundaries(line, col, columns);
+
+        // Set up visual state with selection
+        if let Some(ref mut visual) = self.visual_state {
+            // Set anchor at word start
+            visual.anchor = Some((content_row, word_start));
+            // Set cursor at word end
+            visual.set_cursor(content_row, word_end);
+            // Ensure we're in Line selection mode
+            if !visual.is_selecting() {
+                visual.cycle_selection_mode(); // None -> Line
+            }
+        }
+    }
+
+    /// Select the entire line at the given screen position (triple-click).
+    ///
+    /// This selects from column 0 to the end of the line's effective width.
+    ///
+    /// # Arguments
+    /// * `screen_row` - Row in the visible area (0 = top of visible content)
+    pub fn select_line_at(&mut self, screen_row: usize) {
+        let grid = self.term.grid();
+        let history_size = grid.history_size();
+        let screen_lines = grid.screen_lines();
+        let total_lines = history_size + screen_lines;
+
+        // Convert screen row to content row
+        let visible_bottom = total_lines.saturating_sub(1).saturating_sub(self.scroll_offset);
+        let visible_top = visible_bottom.saturating_sub(screen_lines.saturating_sub(1));
+        let content_row = (visible_top + screen_row).min(total_lines.saturating_sub(1));
+
+        // Get effective line width (position of last non-space character)
+        let line_width = self.get_line_effective_width(content_row);
+        let end_col = line_width.saturating_sub(1);
+
+        // Set up visual state with selection
+        if let Some(ref mut visual) = self.visual_state {
+            // Set anchor at line start
+            visual.anchor = Some((content_row, 0));
+            // Set cursor at line end
+            visual.set_cursor(content_row, end_col);
+            // Ensure we're in Line selection mode
+            if !visual.is_selecting() {
+                visual.cycle_selection_mode(); // None -> Line
+            }
+        }
+    }
+
+    /// Find word boundaries at the given position in a line.
+    /// Returns (start_col, end_col) of the word.
+    fn find_word_boundaries(&self, line: TermLine, col: usize, columns: usize) -> (usize, usize) {
+        let grid = self.term.grid();
+
+        // Get character at position
+        let char_at = |c: usize| -> char {
+            if c < columns {
+                grid[line][Column(c)].c
+            } else {
+                ' '
+            }
+        };
+
+        let is_word_char = |c: char| -> bool {
+            c.is_alphanumeric() || c == '_' || c == '-'
+        };
+
+        let current_char = char_at(col);
+
+        // If clicking on whitespace, just select that cell
+        if current_char.is_whitespace() {
+            return (col, col);
+        }
+
+        // Find word start
+        let mut start = col;
+        while start > 0 {
+            let prev_char = char_at(start - 1);
+            if !is_word_char(prev_char) {
+                break;
+            }
+            start -= 1;
+        }
+
+        // Find word end
+        let mut end = col;
+        while end < columns.saturating_sub(1) {
+            let next_char = char_at(end + 1);
+            if !is_word_char(next_char) {
+                break;
+            }
+            end += 1;
+        }
+
+        (start, end)
     }
 
     /// Clear visual selection (keep cursor position, reset to None mode).

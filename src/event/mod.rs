@@ -17,8 +17,10 @@
 //!
 //! - `assistant`: Key event handling for the AI Assistant pane
 //! - `terminal`: Key event handling for the Terminal pane
+//! - `mouse`: Mouse event handling (click, drag, scroll, passthrough)
 
 pub mod assistant;
+pub mod mouse;
 pub mod terminal;
 
 use std::thread;

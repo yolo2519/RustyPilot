@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::mpsc::{self, Receiver, UnboundedSender};
 use tracing::error;
@@ -255,4 +256,72 @@ impl ShellManager {
 
         Ok(())
     }
+
+    /// Sends a mouse event to the shell using SGR extended mouse protocol.
+    ///
+    /// This converts the crossterm MouseEvent to the SGR mouse protocol format
+    /// (ESC[<Cb;Cx;CyM or m) and sends it to the PTY.
+    ///
+    /// # Arguments
+    /// * `event` - The mouse event to send
+    /// * `terminal_area` - The terminal's inner area for coordinate translation
+    pub fn send_mouse(&mut self, event: MouseEvent, terminal_area: ratatui::layout::Rect) -> Result<()> {
+        let bytes = mouse_to_sgr_bytes(event, terminal_area);
+        if !bytes.is_empty() {
+            self.handle_user_input(&bytes)?;
+        }
+        Ok(())
+    }
+}
+
+/// Convert crossterm MouseEvent to SGR mouse protocol bytes.
+///
+/// SGR mouse protocol format: ESC [ < Cb ; Cx ; Cy M (press) or m (release)
+///
+/// Button codes:
+/// - 0=left, 1=middle, 2=right
+/// - 32=motion (drag with left), 33=motion (drag with middle), 34=motion (drag with right)
+/// - 64=wheel up, 65=wheel down
+///
+/// Modifier additions:
+/// - +4 for Shift, +8 for Alt, +16 for Ctrl
+///
+/// Reference: https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Extended-coordinates
+fn mouse_to_sgr_bytes(event: MouseEvent, terminal_area: ratatui::layout::Rect) -> Vec<u8> {
+    let (mut button_code, is_release) = match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => (0, false),
+        MouseEventKind::Down(MouseButton::Middle) => (1, false),
+        MouseEventKind::Down(MouseButton::Right) => (2, false),
+        MouseEventKind::Up(MouseButton::Left) => (0, true),
+        MouseEventKind::Up(MouseButton::Middle) => (1, true),
+        MouseEventKind::Up(MouseButton::Right) => (2, true),
+        MouseEventKind::Drag(MouseButton::Left) => (32, false),
+        MouseEventKind::Drag(MouseButton::Middle) => (33, false),
+        MouseEventKind::Drag(MouseButton::Right) => (34, false),
+        MouseEventKind::ScrollUp => (64, false),
+        MouseEventKind::ScrollDown => (65, false),
+        MouseEventKind::Moved => return vec![], // Ignore move without button
+        _ => return vec![],
+    };
+
+    // Add modifier keys to button code
+    if event.modifiers.contains(KeyModifiers::SHIFT) {
+        button_code += 4;
+    }
+    if event.modifiers.contains(KeyModifiers::ALT) {
+        button_code += 8;
+    }
+    if event.modifiers.contains(KeyModifiers::CONTROL) {
+        button_code += 16;
+    }
+
+    // Convert screen coordinates to terminal-relative coordinates (1-based)
+    // The event coordinates are absolute screen positions, we need to translate
+    // them to be relative to the terminal area
+    let x = event.column.saturating_sub(terminal_area.x) + 1;
+    let y = event.row.saturating_sub(terminal_area.y) + 1;
+
+    // SGR mouse protocol: ESC [ < Cb ; Cx ; Cy M/m
+    let terminator = if is_release { 'm' } else { 'M' };
+    format!("\x1b[<{};{};{}{}", button_code, x, y, terminator).into_bytes()
 }
