@@ -390,8 +390,8 @@ impl App {
                 return Ok(());
             }
 
-            // c => exit application
-            UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('c') | KeyCode::Char('C')) => {
+            // q => exit application
+            UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Char('q') | KeyCode::Char('Q')) => {
                 self.exit = true;
                 self.set_command_mode(false);
                 return Ok(());

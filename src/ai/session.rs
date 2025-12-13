@@ -99,6 +99,8 @@ pub enum CommandSuggestionStatus {
     Accepted,
     /// User rejected the command
     Rejected,
+    /// User chose another command (auto-rejected)
+    Ignored,
 }
 
 /// A record of a command suggestion and its outcome
@@ -128,8 +130,8 @@ pub struct AiSession {
     pub current_response: String,
     /// History of command suggestions in this session
     pub command_suggestions: Vec<CommandSuggestionRecord>,
-    /// Index of the current pending suggestion (if any)
-    pub pending_suggestion_idx: Option<usize>,
+    /// Indices of pending suggestions from the most recent AI response (supports multiple tool calls)
+    pub pending_suggestion_indices: Vec<usize>,
 }
 
 impl AiSession {
@@ -144,7 +146,7 @@ impl AiSession {
             conversation_history: vec![system_msg],
             current_response: String::new(),
             command_suggestions: Vec::new(),
-            pending_suggestion_idx: None,
+            pending_suggestion_indices: Vec::new(),
         })
     }
 
@@ -154,7 +156,7 @@ impl AiSession {
         self.conversation_history.truncate(1);
         self.current_response.clear();
         self.command_suggestions.clear();
-        self.pending_suggestion_idx = None;
+        self.pending_suggestion_indices.clear();
     }
 
     /// Convert conversation history to UI-displayable ChatMessage format.
@@ -219,7 +221,7 @@ impl AiSession {
                                 let status = match record.status {
                                     CommandSuggestionStatus::Pending => CommandStatus::Pending,
                                     CommandSuggestionStatus::Accepted => CommandStatus::Executed,
-                                    CommandSuggestionStatus::Rejected => CommandStatus::Rejected,
+                                    CommandSuggestionStatus::Rejected | CommandSuggestionStatus::Ignored => CommandStatus::Rejected,
                                 };
                                 messages.push(ChatMessage::CommandCard {
                                     command: record.command.clone(),
@@ -379,11 +381,25 @@ impl AiSessionManager {
         }
     }
 
-    /// Get the pending command suggestion for a session, if any
-    pub fn get_pending_suggestion(&self, session_id: SessionId) -> Option<&CommandSuggestionRecord> {
+    /// Get all pending command suggestions for a session.
+    /// Returns a vector of (command, explanation) tuples.
+    pub fn get_pending_suggestions(&self, session_id: SessionId) -> Vec<(String, String)> {
+        let Some(session) = self.sessions.get(&session_id) else {
+            return Vec::new();
+        };
+
+        session.pending_suggestion_indices
+            .iter()
+            .filter_map(|&idx| session.command_suggestions.get(idx))
+            .map(|r| (r.command.clone(), r.explanation.clone()))
+            .collect()
+    }
+
+    /// Get a specific pending suggestion by its position in the pending list.
+    pub fn get_pending_suggestion_at(&self, session_id: SessionId, pending_idx: usize) -> Option<&CommandSuggestionRecord> {
         let session = self.sessions.get(&session_id)?;
-        let idx = session.pending_suggestion_idx?;
-        session.command_suggestions.get(idx)
+        let &actual_idx = session.pending_suggestion_indices.get(pending_idx)?;
+        session.command_suggestions.get(actual_idx)
     }
 
     /// Execute the suggested command for a session.
@@ -394,64 +410,168 @@ impl AiSessionManager {
         Ok(())
     }
 
-    /// Accept the pending command suggestion.
+    /// Accept the pending command suggestion at the given index.
     ///
-    /// Updates the suggestion status to Accepted, adds a Tool message to history,
-    /// and returns the command string. Returns None if there's no pending suggestion.
-    pub fn accept_suggestion(&mut self, session_id: SessionId) -> Option<String> {
+    /// Updates the suggestion status to Accepted, marks other pending suggestions as Ignored,
+    /// and returns the command string. Returns None if the index is invalid.
+    ///
+    /// Note: Tool messages are NOT added here. They are added later by
+    /// `respond_all_pending_tool_calls` before sending the next message.
+    pub fn accept_suggestion(&mut self, session_id: SessionId, pending_idx: usize) -> Option<String> {
         let session = self.sessions.get_mut(&session_id)?;
-        let idx = session.pending_suggestion_idx.take()?;
-        let record = session.command_suggestions.get_mut(idx)?;
+
+        // Get the actual index in command_suggestions
+        let &actual_idx = session.pending_suggestion_indices.get(pending_idx)?;
+
+        // Mark the selected command as Accepted
+        let record = session.command_suggestions.get_mut(actual_idx)?;
         record.status = CommandSuggestionStatus::Accepted;
         let command = record.command.clone();
-        let tool_call_id = record.tool_call_id.clone();
 
-        // Add Tool message to conversation history
-        // This tells the AI that the user accepted and executed the command
-        if let Ok(tool_msg) = ChatCompletionRequestToolMessageArgs::default()
-            .tool_call_id(tool_call_id)
-            .content(format!(
-                "User accepted and executed the command: {}",
-                command
-            ))
-            .build()
-        {
-            session.conversation_history.push(tool_msg.into());
+        // Mark all other pending suggestions as Ignored
+        for (i, &idx) in session.pending_suggestion_indices.iter().enumerate() {
+            if i != pending_idx {
+                if let Some(other_record) = session.command_suggestions.get_mut(idx) {
+                    other_record.status = CommandSuggestionStatus::Ignored;
+                }
+            }
         }
+
+        // Clear pending indices (all have been processed)
+        session.pending_suggestion_indices.clear();
 
         Some(command)
     }
 
-    /// Reject the pending command suggestion.
+    /// Reject all pending command suggestions.
     ///
-    /// Updates the suggestion status to Rejected and adds a Tool message to history.
+    /// Updates all pending suggestion statuses to Rejected.
+    /// Note: Tool messages are NOT added here. They are added later by
+    /// `respond_all_pending_tool_calls` before sending the next message.
     pub fn reject_suggestion(&mut self, session_id: SessionId) {
         if let Some(session) = self.sessions.get_mut(&session_id) {
-            if let Some(idx) = session.pending_suggestion_idx.take() {
+            // Mark all pending suggestions as Rejected
+            for &idx in &session.pending_suggestion_indices {
                 if let Some(record) = session.command_suggestions.get_mut(idx) {
                     record.status = CommandSuggestionStatus::Rejected;
-                    let tool_call_id = record.tool_call_id.clone();
-
-                    // Add Tool message to conversation history
-                    // This tells the AI that the user rejected the command
-                    if let Ok(tool_msg) = ChatCompletionRequestToolMessageArgs::default()
-                        .tool_call_id(tool_call_id)
-                        .content("User rejected this command suggestion.")
-                        .build()
-                    {
-                        session.conversation_history.push(tool_msg.into());
-                    }
                 }
             }
+
+            // Clear pending indices
+            session.pending_suggestion_indices.clear();
         }
     }
 
-    /// Check if there's a pending command suggestion for a session
+    /// Add tool response messages for all command suggestions that haven't been responded to yet.
+    ///
+    /// This must be called before sending a new message to ensure the conversation history
+    /// is valid (every tool_call must have a corresponding tool message).
+    ///
+    /// Iterates through all command suggestions and adds a tool message for any that
+    /// have a non-Pending status but haven't been responded to yet.
+    fn respond_all_pending_tool_calls(&mut self, session_id: SessionId) {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return;
+        };
+
+        // Find tool calls that need responses by looking at the last assistant message
+        let Some(last_assistant_idx) = session.conversation_history.iter().rposition(|msg| {
+            matches!(msg, ChatCompletionRequestMessage::Assistant(_))
+        }) else {
+            return;
+        };
+
+        // Get the tool call IDs from the last assistant message
+        let tool_call_ids: Vec<String> = if let ChatCompletionRequestMessage::Assistant(asst_msg) =
+            &session.conversation_history[last_assistant_idx]
+        {
+            asst_msg
+                .tool_calls
+                .as_ref()
+                .map(|tcs| tcs.iter().map(|tc| tc.id.clone()).collect())
+                .unwrap_or_default()
+        } else {
+            return;
+        };
+
+        if tool_call_ids.is_empty() {
+            return;
+        }
+
+        // Check which tool calls already have responses
+        let existing_responses: std::collections::HashSet<String> = session
+            .conversation_history
+            .iter()
+            .skip(last_assistant_idx + 1)
+            .filter_map(|msg| {
+                if let ChatCompletionRequestMessage::Tool(tool_msg) = msg {
+                    Some(tool_msg.tool_call_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Find command suggestions that match the tool call IDs and need responses
+        for tool_call_id in tool_call_ids {
+            if existing_responses.contains(&tool_call_id) {
+                continue; // Already has a response
+            }
+
+            // Find the corresponding command suggestion
+            let suggestion = session
+                .command_suggestions
+                .iter()
+                .find(|r| r.tool_call_id == tool_call_id);
+
+            let response_content = if let Some(record) = suggestion {
+                match record.status {
+                    CommandSuggestionStatus::Pending => {
+                        // Still pending - user hasn't decided yet, mark as ignored
+                        "User did not respond to this suggestion."
+                    }
+                    CommandSuggestionStatus::Accepted => {
+                        // This should have been responded to already, but add it anyway
+                        "User accepted and executed this command."
+                    }
+                    CommandSuggestionStatus::Rejected => "User rejected this command suggestion.",
+                    CommandSuggestionStatus::Ignored => {
+                        "User chose a different command from the suggestions."
+                    }
+                }
+            } else {
+                // Unknown tool call (shouldn't happen, but handle gracefully)
+                "Tool call acknowledged."
+            };
+
+            // Add tool message
+            if let Ok(tool_msg) = ChatCompletionRequestToolMessageArgs::default()
+                .tool_call_id(tool_call_id)
+                .content(response_content)
+                .build()
+            {
+                session.conversation_history.push(tool_msg.into());
+            }
+        }
+
+        // Clear any remaining pending indices (they've all been handled now)
+        session.pending_suggestion_indices.clear();
+    }
+
+    /// Check if there's any pending command suggestion for a session
     pub fn has_pending_suggestion(&self, session_id: SessionId) -> bool {
         self.sessions
             .get(&session_id)
-            .map(|s| s.pending_suggestion_idx.is_some())
+            .map(|s| !s.pending_suggestion_indices.is_empty())
             .unwrap_or(false)
+    }
+
+    /// Get the number of pending suggestions for a session
+    pub fn pending_suggestion_count(&self, session_id: SessionId) -> usize {
+        self.sessions
+            .get(&session_id)
+            .map(|s| s.pending_suggestion_indices.len())
+            .unwrap_or(0)
     }
 
     pub fn new_session(&mut self) -> Result<SessionId, OpenAIError> {
@@ -499,16 +619,20 @@ impl AiSessionManager {
     /// Send a message to the AI with system context and receive a streaming response.
     ///
     /// This method:
-    /// 1. Builds a prompt with user query + system context (cwd, env, history)
-    /// 2. Sends the request to OpenAI with Tool Calling enabled
-    /// 3. Streams chunks back through the ai_stream_tx channel
-    /// 4. Tool calls are accumulated and sent as AiStreamData::ToolCall
+    /// 1. Responds to any pending tool calls (ensures valid history)
+    /// 2. Builds a prompt with user query + system context (cwd, env, history)
+    /// 3. Sends the request to OpenAI with Tool Calling enabled
+    /// 4. Streams chunks back through the ai_stream_tx channel
+    /// 5. Tool calls are accumulated and sent as AiStreamData::ToolCall
     pub fn send_message(
         &mut self,
         session_id: SessionId,
         user_input: &str,
         context: ContextSnapshot,
     ) {
+        // First, ensure all previous tool calls have responses
+        self.respond_all_pending_tool_calls(session_id);
+
         // Get session and add user message to history
         let session = match self.sessions.get_mut(&session_id) {
             Some(s) => s,
@@ -689,13 +813,16 @@ impl AiSessionManager {
     }
 
     /// Process tool calls received from the AI.
-    /// Stores the assistant message with tool calls and extracts command suggestions.
+    /// Stores the assistant message with tool calls and extracts ALL command suggestions.
+    /// Returns a vector of (command, explanation) tuples for UI display.
     fn process_tool_calls(
         &mut self,
         session_id: SessionId,
         tool_calls: Vec<(String, String, String)>,
-    ) -> Option<(String, String)> {
-        let session = self.sessions.get_mut(&session_id)?;
+    ) -> Vec<(String, String)> {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return Vec::new();
+        };
 
         // Get any accumulated text response
         let text_response = std::mem::take(&mut session.current_response);
@@ -726,7 +853,11 @@ impl AiSessionManager {
 
         Self::trim_history(session);
 
-        // Process suggest_command tool calls
+        // Clear any previous pending indices (new batch of tool calls)
+        session.pending_suggestion_indices.clear();
+
+        // Process ALL suggest_command tool calls
+        let mut commands = Vec::new();
         for (id, name, args) in tool_calls {
             if name == TOOL_SUGGEST_COMMAND {
                 // Parse the JSON arguments
@@ -738,14 +869,15 @@ impl AiSessionManager {
                         status: CommandSuggestionStatus::Pending,
                     };
                     session.command_suggestions.push(record);
-                    session.pending_suggestion_idx = Some(session.command_suggestions.len() - 1);
+                    // Track this as a pending suggestion
+                    session.pending_suggestion_indices.push(session.command_suggestions.len() - 1);
 
-                    return Some((suggestion.command, suggestion.explanation));
+                    commands.push((suggestion.command, suggestion.explanation));
                 }
             }
         }
 
-        None
+        commands
     }
 
     /// Finalize a text-only response (no tool calls).
@@ -815,18 +947,16 @@ impl AiSessionManager {
                 session_id,
                 tool_calls,
             } => {
-                // Process tool calls and extract command suggestion
-                if let Some((command, explanation)) =
-                    self.process_tool_calls(session_id, tool_calls)
-                {
+                // Process all tool calls and extract command suggestions
+                let commands = self.process_tool_calls(session_id, tool_calls);
+                if commands.is_empty() {
+                    // Tool calls processed but no command suggestions
+                    None
+                } else {
                     Some(AiUiUpdate::CommandSuggestion {
                         session_id,
-                        command,
-                        explanation,
+                        commands,
                     })
-                } else {
-                    // Tool calls processed but no command suggestion
-                    None
                 }
             }
 

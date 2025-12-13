@@ -123,11 +123,11 @@ pub enum AiUiUpdate {
         session_id: SessionId,
         error: String,
     },
-    /// AI suggested a command that should be displayed as a card
+    /// AI suggested one or more commands that should be displayed as card(s)
     CommandSuggestion {
         session_id: SessionId,
-        command: String,
-        explanation: String,
+        /// List of (command, explanation) tuples
+        commands: Vec<(String, String)>,
     },
 }
 
