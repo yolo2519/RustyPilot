@@ -64,20 +64,22 @@ impl Widget for &App {
         self.tui_terminal.render(term_area, buf);
 
         // Determine separator style
+        // Command mode: use same L-shape as normal mode based on active pane
         let side = match active {
-            _ if self.get_command_mode() => ActiveSide::None(cmdmode_color),
             ActivePane::Terminal => {
-                if term_status.border_color.is_some() {
-                    ActiveSide::None(active_termcolor)
+                let color = if self.get_command_mode() { cmdmode_color } else { active_termcolor };
+                if term_status.border_color.is_some() && !self.get_command_mode() {
+                    ActiveSide::None(color)
                 } else {
-                    ActiveSide::Left(active_termcolor)
+                    ActiveSide::Left(color)
                 }
             }
             ActivePane::Assistant => {
-                if ai_status.border_color.is_some() {
-                    ActiveSide::None(active_aicolor)
+                let color = if self.get_command_mode() { cmdmode_color } else { active_aicolor };
+                if ai_status.border_color.is_some() && !self.get_command_mode() {
+                    ActiveSide::None(color)
                 } else {
-                    ActiveSide::Right(active_aicolor)
+                    ActiveSide::Right(color)
                 }
             }
         };
