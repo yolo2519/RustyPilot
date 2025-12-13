@@ -16,6 +16,7 @@ use ratatui::{
 };
 use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tracing::error;
+use unicode_width::UnicodeWidthChar;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -835,11 +836,17 @@ impl Widget for &TuiTerminal {
                         style = Style::default().fg(Color::White).bg(Color::Blue);
                     }
 
+                    // Get the display width of the character (CJK chars are typically 2)
+                    let char_width = UnicodeWidthChar::width(render_char).unwrap_or(1);
+
                     if let Some(cell) = buf.cell_mut((x, area.y + row as u16)) {
                         cell.set_char(render_char).set_style(style);
                     }
-                    x += 1;
-                    col += 1;
+
+                    // Advance x and col by the character's display width
+                    // This accounts for wide characters (CJK) that occupy 2 columns
+                    x += char_width as u16;
+                    col += char_width;
                 }
             }
 
