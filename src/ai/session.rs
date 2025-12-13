@@ -223,10 +223,19 @@ impl AiSession {
                                     CommandSuggestionStatus::Accepted => CommandStatus::Executed,
                                     CommandSuggestionStatus::Rejected | CommandSuggestionStatus::Ignored => CommandStatus::Rejected,
                                 };
+                                // Evaluate command security
+                                let verdict = crate::security::evaluate(&record.command);
+                                let reason = match verdict {
+                                    crate::security::Verdict::Allow => None,
+                                    crate::security::Verdict::RequireConfirmation => Some("Requires confirmation".to_string()),
+                                    crate::security::Verdict::Deny => Some("Contains dangerous shell operators".to_string()),
+                                };
                                 messages.push(ChatMessage::CommandCard {
                                     command: record.command.clone(),
                                     explanation: record.explanation.clone(),
                                     status,
+                                    verdict,
+                                    reason,
                                 });
                                 command_idx += 1;
                             }

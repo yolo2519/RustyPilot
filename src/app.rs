@@ -13,6 +13,7 @@ use crate::shell::ShellManager;
 use crate::ui::assistant::TuiAssistant;
 use crate::ui::terminal::TuiTerminal;
 use crate::ui::layout::{AppLayout, LayoutBuilder};
+use crate::security::{evaluate, ExecutionDecision, gate_command};
 
 
 use anyhow::{Context, Result};
@@ -114,6 +115,69 @@ impl App {
 
     pub fn get_command_mode(&self) -> bool {
         self.command_mode
+    }
+
+    /// Single execution entrypoint that enforces security verdict gating.
+    ///
+    /// This method is the ONLY way commands should be executed from AI suggestions.
+    /// It evaluates the command, checks the verdict, and decides whether to:
+    /// - Execute immediately (Allow)
+    /// - Require user confirmation (RequireConfirmation)
+    /// - Deny execution (Deny)
+    ///
+    /// # Arguments
+    /// * `cmd` - The command string to execute
+    ///
+    /// # Returns
+    /// * `Ok(())` if the command was handled appropriately
+    /// * `Err(_)` if execution failed
+    ///
+    /// # Behavior by Verdict
+    /// - `Allow`: Executes immediately via `execute_visible()`
+    /// - `RequireConfirmation`: Returns Ok without executing (UI handles confirmation)
+    /// - `Deny`: Returns Ok without executing and surfaces error to UI
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # use rusty_term::app::App;
+    /// # fn example(app: &mut App) -> anyhow::Result<()> {
+    /// // Safe command - executes immediately
+    /// app.try_execute_suggested("ls -la")?;
+    ///
+    /// // Dangerous command - denied, error shown to user
+    /// app.try_execute_suggested("rm -rf /")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn try_execute_suggested(&mut self, cmd: &str) -> Result<()> {
+        // Evaluate the command to get its security verdict
+        let verdict = evaluate(cmd);
+        
+        // Gate the command based on its verdict
+        let decision = gate_command(cmd, verdict);
+        
+        match decision {
+            ExecutionDecision::Execute => {
+                // Allow verdict: execute immediately
+                self.shell_manager
+                    .execute_visible(cmd)
+                    .context("Failed to execute allowed command")?;
+            }
+            ExecutionDecision::RequireConfirmation { reason } => {
+                // RequireConfirmation verdict: do not execute yet
+                // The UI already shows the command card with confirmation prompt
+                // This is handled by the confirm_command flow in the event handler
+                // Log the reason for debugging
+                let _ = reason; // Suppress unused warning
+                // No execution happens here - user must confirm first
+            }
+            ExecutionDecision::Deny { reason } => {
+                // Deny verdict: do not execute, surface error to UI
+                self.tui_terminal.show_error(&format!("Command denied: {}", reason));
+            }
+        }
+        
+        Ok(())
     }
 
     pub fn set_command_mode(&mut self, flag: bool) {
@@ -446,9 +510,9 @@ impl App {
             }
 
             // AI Events
-            AppEvent::ExecuteAiCommand { command, .. } => {
-                // Inject the command into the shell
-                self.shell_manager.inject_command(&command)?;
+            AppEvent::ExecuteAiCommand { session_id: _, command } => {
+                // Execute through the security gate (single entrypoint)
+                self.try_execute_suggested(&command)?;
             }
 
             // Shell Events

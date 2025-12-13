@@ -39,7 +39,7 @@ pub fn handle_key_event(
 
             // Ctrl+Y => Execute the currently displayed command
             KeyCode::Char('y') | KeyCode::Char('Y')
-                if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>
+            if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 // Get the index of the currently displayed suggestion
                 let pending_idx = assistant.current_suggestion_index();
@@ -51,6 +51,7 @@ pub fn handle_key_event(
 
                     // Tell the session manager to execute the suggested command
                     // It will send the ExecuteAiCommand event to the app layer
+                    // Security gating happens in app.rs try_execute_suggested()
                     ai_sessions.execute_suggestion(session_id, command)?;
                 }
 
@@ -59,9 +60,8 @@ pub fn handle_key_event(
 
             // Ctrl+N => Reject all command suggestions
             KeyCode::Char('n') | KeyCode::Char('N')
-                if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                // Update backend state first (marks all suggestions as Rejected)
+            if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>{
+                // Update backend state first (marks suggestion as Rejected)
                 ai_sessions.reject_suggestion(session_id);
                 // Update UI
                 assistant.reject_command();
