@@ -7,7 +7,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::mpsc::{self, Receiver, UnboundedSender};
 use tracing::error;
@@ -165,6 +165,73 @@ impl ShellManager {
         // Add newline to execute
         pty_writer.write_all(b"\n")?;
         pty_writer.flush()?;
+
+        Ok(())
+    }
+
+    /// Executes a command visibly in the shell, as if the user typed it.
+    ///
+    /// This method writes the command string followed by a newline to the PTY,
+    /// making it appear in the terminal as if the user had manually entered it.
+    /// The command will be visible in the shell's history and output.
+    ///
+    /// # Non-blocking Behavior
+    /// This method returns immediately after writing the command to the PTY.
+    /// It does NOT wait for the command to complete. Output from the command
+    /// will appear asynchronously through the existing PTY read loop and will
+    /// be delivered via the output channel created in `ShellManager::new()`.
+    ///
+    /// # Arguments
+    /// * `cmd` - The command string to execute (without trailing newline)
+    ///
+    /// # Returns
+    /// * `Ok(())` if the command was successfully written to the PTY
+    /// * `Err(_)` if the PTY writer lock could not be acquired or write failed
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rusty_term::shell::ShellManager;
+    /// # use tokio::sync::mpsc::unbounded_channel;
+    /// # fn example() -> anyhow::Result<()> {
+    /// # let (tx, _) = unbounded_channel();
+    /// # let (mut shell, _rx) = ShellManager::new(tx, 80, 24)?;
+    /// // Execute a simple command
+    /// shell.execute_visible("ls -la")?;
+    ///
+    /// // Execute a git command
+    /// shell.execute_visible("git status")?;
+    ///
+    /// // The output will appear asynchronously via the output receiver
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - The PTY writer mutex is poisoned
+    /// - Writing to the PTY fails (e.g., shell process has exited)
+    /// - Flushing the PTY writer fails
+    pub fn execute_visible(&mut self, cmd: &str) -> Result<()> {
+        let mut pty_writer = self
+            .pty_writer
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock PTY writer: {}", e))
+            .context("Unable to acquire PTY writer lock for command execution")?;
+
+        // Write command string to PTY
+        pty_writer
+            .write_all(cmd.as_bytes())
+            .context("Failed to write command to PTY")?;
+
+        // Add newline to execute the command
+        pty_writer
+            .write_all(b"\n")
+            .context("Failed to write newline to PTY")?;
+
+        // Flush to ensure command is sent immediately
+        pty_writer
+            .flush()
+            .context("Failed to flush PTY writer")?;
 
         Ok(())
     }

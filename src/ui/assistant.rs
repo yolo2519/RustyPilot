@@ -19,6 +19,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::ai::session::SessionId;
 use crate::event::AiUiUpdate;
+use crate::security::Verdict;
 use super::visual::{VisualState, SelectionMode, PaneStatus, KeyHandleResult, copy_to_clipboard, is_in_selection_with_mode};
 
 // ============================================================================
@@ -52,6 +53,8 @@ pub enum ChatMessage {
         command: String,
         explanation: String,
         status: CommandStatus,
+        verdict: Verdict,
+        reason: Option<String>,
     },
     /// An error message from the system
     Error { text: String },
@@ -293,11 +296,21 @@ impl TuiAssistant {
 
     /// Add a command suggestion card
     pub fn push_command_card(&mut self, command: String, explanation: String) {
+        // Evaluate command security
+        let verdict = crate::security::evaluate(&command);
+        let reason = match verdict {
+            Verdict::Allow => None,
+            Verdict::RequireConfirmation => Some("Requires confirmation".to_string()),
+            Verdict::Deny => Some("Contains dangerous shell operators".to_string()),
+        };
+        
         let idx = self.messages.len();
         self.messages.push(ChatMessage::CommandCard {
             command,
             explanation,
             status: CommandStatus::Pending,
+            verdict,
+            reason,
         });
         self.pending_command_idx = Some(idx);
         self.scroll_to_bottom();
@@ -317,14 +330,33 @@ impl TuiAssistant {
         self.pending_command_idx.is_some()
     }
 
-    /// Confirm the pending command (Y key) - returns the command string
+    /// Confirm the pending command (Y key) - returns the command string if allowed
+    ///
+    /// This method enforces verdict gating:
+    /// - `Verdict::Allow`: Can be executed immediately
+    /// - `Verdict::RequireConfirmation`: Can be executed after user confirmation
+    /// - `Verdict::Deny`: Cannot be executed, returns None
+    ///
+    /// # Returns
+    /// - `Some(command)` if the command can be executed (Allow or RequireConfirmation)
+    /// - `None` if the command is denied or no pending command exists
     pub fn confirm_command(&mut self) -> Option<String> {
         if let Some(idx) = self.pending_command_idx.take() {
-            if let Some(ChatMessage::CommandCard { command, status, .. }) =
+            if let Some(ChatMessage::CommandCard { command, status, verdict, .. }) =
                 self.messages.get_mut(idx)
             {
-                *status = CommandStatus::Executed;
-                return Some(command.clone());
+                // Verdict gating: only Allow and RequireConfirmation can execute
+                match verdict {
+                    Verdict::Allow | Verdict::RequireConfirmation => {
+                        *status = CommandStatus::Executed;
+                        return Some(command.clone());
+                    }
+                    Verdict::Deny => {
+                        // Deny verdict: do not execute, just clear pending state
+                        *status = CommandStatus::Rejected;
+                        return None;
+                    }
+                }
             }
         }
         None
@@ -909,8 +941,17 @@ impl TuiAssistant {
                     command,
                     explanation,
                     status,
+                    verdict,
+                    reason,
                 } => {
-                    all_lines.extend(render_command_card(command, explanation, *status, width));
+                    all_lines.extend(render_command_card(
+                        command,
+                        explanation,
+                        *status,
+                        *verdict,
+                        reason.as_deref(),
+                        width,
+                    ));
                     all_lines.push(Line::raw(""));
                 }
                 ChatMessage::Error { text } => {
@@ -1654,8 +1695,17 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
                 command,
                 explanation,
                 status,
+                verdict,
+                reason,
             } => {
-                all_lines.extend(render_command_card(command, explanation, *status, area.width));
+                all_lines.extend(render_command_card(
+                    command,
+                    explanation,
+                    *status,
+                    *verdict,
+                    reason.as_deref(),
+                    area.width,
+                ));
                 all_lines.push(Line::raw("")); // Empty line after card
             }
             ChatMessage::Error { text } => {
@@ -1797,17 +1847,19 @@ fn render_command_card(
     command: &str,
     explanation: &str,
     status: CommandStatus,
+    verdict: Verdict,
+    reason: Option<&str>,
     width: u16,
 ) -> Vec<Line<'static>> {
     // TODO: the explanation could contains more than one single line,
     //       but now it only renders one line.
     let mut lines = Vec::new();
 
-    // Card border style based on status
-    let (border_color, status_text) = match status {
-        CommandStatus::Pending => (Color::Yellow, "[Ctrl+Y] Execute  [Ctrl+N] Cancel"),
-        CommandStatus::Executed => (Color::Green, "Executed"),
-        CommandStatus::Rejected => (Color::Red, "Rejected"),
+    // Determine border color and verdict label based on verdict
+    let (border_color, verdict_label, verdict_style) = match verdict {
+        Verdict::Allow => (Color::Green, "✓ Allow", Style::default().fg(Color::Green)),
+        Verdict::RequireConfirmation => (Color::Yellow, "⚠ Confirm", Style::default().fg(Color::Yellow)),
+        Verdict::Deny => (Color::Red, "✗ Deny", Style::default().fg(Color::Red).bold()),
     };
 
     let card_width = (width as usize).saturating_sub(4).max(20);
@@ -1815,6 +1867,19 @@ fn render_command_card(
     // Top border
     let top_border = format!(" ┌{}┐", "─".repeat(card_width));
     lines.push(Line::styled(top_border, Style::default().fg(border_color)));
+
+    // Verdict line with reason
+    let verdict_text = if let Some(r) = reason {
+        format!("{}: {}", verdict_label, r)
+    } else {
+        verdict_label.to_string()
+    };
+    let verdict_line = format_card_line(&verdict_text, card_width);
+    lines.push(Line::from(vec![
+        Span::styled(" │", Style::default().fg(border_color)),
+        Span::styled(verdict_line, verdict_style),
+        Span::styled("│", Style::default().fg(border_color)),
+    ]));
 
     // Explanation line (if not empty)
     if !explanation.is_empty() {
@@ -1834,10 +1899,22 @@ fn render_command_card(
         Span::styled("│", Style::default().fg(border_color)),
     ]));
 
-    // Status/action line
-    let status_line = format_card_line(status_text, card_width);
+    // Status/action line based on verdict and status
+    let action_text = match (verdict, status) {
+        (Verdict::Deny, CommandStatus::Pending) => "[C] Copy only  [Esc] Cancel",
+        (Verdict::Deny, CommandStatus::Executed) => "Copied",
+        (Verdict::Deny, CommandStatus::Rejected) => "Rejected",
+        (Verdict::Allow, CommandStatus::Pending) => "[Y] Run  [N/Esc] Cancel",
+        (Verdict::Allow, CommandStatus::Executed) => "Executed",
+        (Verdict::Allow, CommandStatus::Rejected) => "Rejected",
+        (Verdict::RequireConfirmation, CommandStatus::Pending) => "[Y] Confirm & Run  [N/Esc] Cancel",
+        (Verdict::RequireConfirmation, CommandStatus::Executed) => "Executed",
+        (Verdict::RequireConfirmation, CommandStatus::Rejected) => "Rejected",
+    };
+    
+    let status_line = format_card_line(action_text, card_width);
     let status_style = match status {
-        CommandStatus::Pending => Style::default().fg(Color::Yellow),
+        CommandStatus::Pending => Style::default().fg(border_color),
         CommandStatus::Executed => Style::default().fg(Color::Green),
         CommandStatus::Rejected => Style::default().fg(Color::Red).dim(),
     };
