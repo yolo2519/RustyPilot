@@ -237,6 +237,13 @@ impl AiSession {
                                     crate::security::Verdict::RequireConfirmation => Some("Requires confirmation".to_string()),
                                     crate::security::Verdict::Deny => Some("Contains dangerous shell operators".to_string()),
                                 };
+                                // Evaluate command security
+                                let verdict = crate::security::evaluate(&record.command);
+                                let reason = match verdict {
+                                    crate::security::Verdict::Allow => None,
+                                    crate::security::Verdict::RequireConfirmation => Some("Requires confirmation".to_string()),
+                                    crate::security::Verdict::Deny => Some("Contains dangerous shell operators".to_string()),
+                                };
                                 messages.push(ChatMessage::CommandCard {
                                     command: record.command.clone(),
                                     explanation: record.explanation.clone(),
