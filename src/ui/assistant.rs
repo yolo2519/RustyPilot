@@ -1016,6 +1016,7 @@ impl TuiAssistant {
                         *verdict,
                         reason.as_deref(),
                         width,
+                        None,
                     ));
                     all_lines.push(Line::raw(""));
                 }
@@ -1770,6 +1771,7 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
                     *verdict,
                     reason.as_deref(),
                     area.width,
+                    None,
                 ));
                 all_lines.push(Line::raw("")); // Empty line after card
             }
