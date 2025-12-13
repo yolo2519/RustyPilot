@@ -152,10 +152,10 @@ impl App {
     pub fn try_execute_suggested(&mut self, cmd: &str) -> Result<()> {
         // Evaluate the command to get its security verdict
         let verdict = evaluate(cmd);
-        
+
         // Gate the command based on its verdict
-        let decision = gate_command(cmd, verdict);
-        
+        let decision = gate_command(cmd, &verdict);
+
         match decision {
             ExecutionDecision::Execute => {
                 // Allow verdict: execute immediately
@@ -164,19 +164,18 @@ impl App {
                     .context("Failed to execute allowed command")?;
             }
             ExecutionDecision::RequireConfirmation { reason } => {
-                // RequireConfirmation verdict: do not execute yet
-                // The UI already shows the command card with confirmation prompt
-                // This is handled by the confirm_command flow in the event handler
-                // Log the reason for debugging
-                let _ = reason; // Suppress unused warning
-                // No execution happens here - user must confirm first
+                // User already confirmed via Ctrl+Y, execute the command
+                let _ = reason;
+                self.shell_manager
+                    .execute_visible(cmd)
+                    .context("Failed to execute confirmed command")?;
             }
             ExecutionDecision::Deny { reason } => {
                 // Deny verdict: do not execute, surface error to UI
                 self.tui_terminal.show_error(&format!("Command denied: {}", reason));
             }
         }
-        
+
         Ok(())
     }
 

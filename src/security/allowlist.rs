@@ -6,11 +6,31 @@
 use std::collections::HashSet;
 
 /// Verdict for command evaluation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Allow,
-    RequireConfirmation,
-    Deny,
+    RequireConfirmation(String),
+    Deny(String),
+}
+
+impl Verdict {
+    /// Get the reason for this verdict (if any)
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Verdict::Allow => None,
+            Verdict::RequireConfirmation(r) | Verdict::Deny(r) => Some(r),
+        }
+    }
+
+    /// Check if this verdict allows execution
+    pub fn is_allowed(&self) -> bool {
+        matches!(self, Verdict::Allow | Verdict::RequireConfirmation(_))
+    }
+
+    /// Check if this verdict is a denial
+    pub fn is_deny(&self) -> bool {
+        matches!(self, Verdict::Deny(_))
+    }
 }
 
 pub struct Allowlist {
@@ -50,32 +70,32 @@ impl Allowlist {
 /// - Default: RequireConfirmation for other commands
 pub fn evaluate(cmd: &str) -> Verdict {
     let trimmed = cmd.trim();
-    
+
     // Empty command
     if trimmed.is_empty() {
-        return Verdict::Deny;
+        return Verdict::Deny("Empty command".to_string());
     }
-    
+
     // Check for dangerous shell composition tokens
     if contains_shell_composition(trimmed) {
-        return Verdict::Deny;
+        return Verdict::Deny("Contains dangerous shell operators".to_string());
     }
-    
+
     // Extract the base command (first word)
     let base_cmd = trimmed.split_whitespace().next().unwrap_or("");
-    
+
     // Check minimal safe set
     if is_safe_command(base_cmd) {
         return Verdict::Allow;
     }
-    
+
     // Handle git commands specially
     if base_cmd == "git" {
         return evaluate_git_command(trimmed);
     }
-    
+
     // Default: require confirmation
-    Verdict::RequireConfirmation
+    Verdict::RequireConfirmation("Requires confirmation".to_string())
 }
 
 /// Check if command contains dangerous shell composition tokens
@@ -84,27 +104,27 @@ fn contains_shell_composition(cmd: &str) -> bool {
     if cmd.contains('|') {
         return true;
     }
-    
+
     // Check for semicolon
     if cmd.contains(';') {
         return true;
     }
-    
+
     // Check for logical operators
     if cmd.contains("&&") || cmd.contains("||") {
         return true;
     }
-    
+
     // Check for redirects
     if cmd.contains('>') || cmd.contains('<') {
         return true;
     }
-    
+
     // Check for command substitution
     if cmd.contains("$(") || cmd.contains('`') {
         return true;
     }
-    
+
     // Check for background execution
     // Note: we need to check for & but not within && (already checked above)
     // A simple approach: if & exists and && doesn't explain all &, it's dangerous
@@ -113,7 +133,7 @@ fn contains_shell_composition(cmd: &str) -> bool {
     if ampersand_count > double_ampersand_count * 2 {
         return true;
     }
-    
+
     false
 }
 
@@ -126,29 +146,29 @@ fn is_safe_command(cmd: &str) -> bool {
 fn evaluate_git_command(cmd: &str) -> Verdict {
     // Extract git subcommand (second word after "git")
     let parts: Vec<&str> = cmd.split_whitespace().collect();
-    
+
     if parts.len() < 2 {
         // Just "git" without subcommand
         return Verdict::Allow;
     }
-    
+
     let subcommand = parts[1];
-    
+
     // Allow safe read-only git commands
     if matches!(subcommand, "status" | "diff" | "log" | "show") {
         return Verdict::Allow;
     }
-    
+
     // Deny dangerous git commands
     if matches!(
         subcommand,
         "push" | "reset" | "clean" | "rebase" | "force" | "branch" | "checkout" | "merge" | "pull"
     ) {
-        return Verdict::Deny;
+        return Verdict::Deny(format!("git {} is a destructive operation", subcommand));
     }
-    
+
     // Other git commands require confirmation
-    Verdict::RequireConfirmation
+    Verdict::RequireConfirmation("Requires confirmation".to_string())
 }
 
 #[cfg(test)]
@@ -157,8 +177,8 @@ mod tests {
 
     #[test]
     fn test_empty_command() {
-        assert_eq!(evaluate(""), Verdict::Deny);
-        assert_eq!(evaluate("   "), Verdict::Deny);
+        assert!(evaluate("").is_deny());
+        assert!(evaluate("   ").is_deny());
     }
 
     #[test]
@@ -177,41 +197,41 @@ mod tests {
 
     #[test]
     fn test_shell_composition_pipe() {
-        assert_eq!(evaluate("ls | grep test"), Verdict::Deny);
-        assert_eq!(evaluate("cat file | wc -l"), Verdict::Deny);
+        assert!(evaluate("ls | grep test").is_deny());
+        assert!(evaluate("cat file | wc -l").is_deny());
     }
 
     #[test]
     fn test_shell_composition_semicolon() {
-        assert_eq!(evaluate("ls; pwd"), Verdict::Deny);
-        assert_eq!(evaluate("echo a; echo b"), Verdict::Deny);
+        assert!(evaluate("ls; pwd").is_deny());
+        assert!(evaluate("echo a; echo b").is_deny());
     }
 
     #[test]
     fn test_shell_composition_logical() {
-        assert_eq!(evaluate("ls && pwd"), Verdict::Deny);
-        assert_eq!(evaluate("ls || pwd"), Verdict::Deny);
-        assert_eq!(evaluate("test -f file && cat file"), Verdict::Deny);
+        assert!(evaluate("ls && pwd").is_deny());
+        assert!(evaluate("ls || pwd").is_deny());
+        assert!(evaluate("test -f file && cat file").is_deny());
     }
 
     #[test]
     fn test_shell_composition_redirect() {
-        assert_eq!(evaluate("echo test > file.txt"), Verdict::Deny);
-        assert_eq!(evaluate("cat < input.txt"), Verdict::Deny);
-        assert_eq!(evaluate("ls >> output.log"), Verdict::Deny);
+        assert!(evaluate("echo test > file.txt").is_deny());
+        assert!(evaluate("cat < input.txt").is_deny());
+        assert!(evaluate("ls >> output.log").is_deny());
     }
 
     #[test]
     fn test_shell_composition_subshell() {
-        assert_eq!(evaluate("echo $(pwd)"), Verdict::Deny);
-        assert_eq!(evaluate("rm -rf $(find .)"), Verdict::Deny);
-        assert_eq!(evaluate("echo `date`"), Verdict::Deny);
+        assert!(evaluate("echo $(pwd)").is_deny());
+        assert!(evaluate("rm -rf $(find .)").is_deny());
+        assert!(evaluate("echo `date`").is_deny());
     }
 
     #[test]
     fn test_shell_composition_background() {
-        assert_eq!(evaluate("sleep 100 &"), Verdict::Deny);
-        assert_eq!(evaluate("long_process &"), Verdict::Deny);
+        assert!(evaluate("sleep 100 &").is_deny());
+        assert!(evaluate("long_process &").is_deny());
         // Note: "&&" should be caught by logical operator check, not background
     }
 
@@ -227,35 +247,35 @@ mod tests {
 
     #[test]
     fn test_git_dangerous_commands() {
-        assert_eq!(evaluate("git push"), Verdict::Deny);
-        assert_eq!(evaluate("git push origin main"), Verdict::Deny);
-        assert_eq!(evaluate("git reset"), Verdict::Deny);
-        assert_eq!(evaluate("git reset --hard"), Verdict::Deny);
-        assert_eq!(evaluate("git clean"), Verdict::Deny);
-        assert_eq!(evaluate("git clean -fd"), Verdict::Deny);
-        assert_eq!(evaluate("git rebase"), Verdict::Deny);
-        assert_eq!(evaluate("git branch -D feature"), Verdict::Deny);
-        assert_eq!(evaluate("git checkout main"), Verdict::Deny);
-        assert_eq!(evaluate("git merge"), Verdict::Deny);
-        assert_eq!(evaluate("git pull"), Verdict::Deny);
+        assert!(evaluate("git push").is_deny());
+        assert!(evaluate("git push origin main").is_deny());
+        assert!(evaluate("git reset").is_deny());
+        assert!(evaluate("git reset --hard").is_deny());
+        assert!(evaluate("git clean").is_deny());
+        assert!(evaluate("git clean -fd").is_deny());
+        assert!(evaluate("git rebase").is_deny());
+        assert!(evaluate("git branch -D feature").is_deny());
+        assert!(evaluate("git checkout main").is_deny());
+        assert!(evaluate("git merge").is_deny());
+        assert!(evaluate("git pull").is_deny());
     }
 
     #[test]
     fn test_git_other_commands() {
-        assert_eq!(evaluate("git add ."), Verdict::RequireConfirmation);
-        assert_eq!(evaluate("git commit -m 'test'"), Verdict::RequireConfirmation);
-        assert_eq!(evaluate("git stash"), Verdict::RequireConfirmation);
-        assert_eq!(evaluate("git tag v1.0"), Verdict::RequireConfirmation);
+        assert!(matches!(evaluate("git add ."), Verdict::RequireConfirmation(_)));
+        assert!(matches!(evaluate("git commit -m 'test'"), Verdict::RequireConfirmation(_)));
+        assert!(matches!(evaluate("git stash"), Verdict::RequireConfirmation(_)));
+        assert!(matches!(evaluate("git tag v1.0"), Verdict::RequireConfirmation(_)));
     }
 
     #[test]
     fn test_other_commands() {
-        assert_eq!(evaluate("cat file.txt"), Verdict::RequireConfirmation);
-        assert_eq!(evaluate("cd /tmp"), Verdict::RequireConfirmation);
-        assert_eq!(evaluate("mkdir test"), Verdict::RequireConfirmation);
-        assert_eq!(evaluate("rm file.txt"), Verdict::RequireConfirmation);
-        assert_eq!(evaluate("cp a b"), Verdict::RequireConfirmation);
-        assert_eq!(evaluate("mv a b"), Verdict::RequireConfirmation);
+        assert!(matches!(evaluate("cat file.txt"), Verdict::RequireConfirmation(_)));
+        assert!(matches!(evaluate("cd /tmp"), Verdict::RequireConfirmation(_)));
+        assert!(matches!(evaluate("mkdir test"), Verdict::RequireConfirmation(_)));
+        assert!(matches!(evaluate("rm file.txt"), Verdict::RequireConfirmation(_)));
+        assert!(matches!(evaluate("cp a b"), Verdict::RequireConfirmation(_)));
+        assert!(matches!(evaluate("mv a b"), Verdict::RequireConfirmation(_)));
     }
 
     #[test]
@@ -269,11 +289,11 @@ mod tests {
     fn test_edge_cases() {
         // Command with extra spaces
         assert_eq!(evaluate("  ls  -la  "), Verdict::Allow);
-        
+
         // Git with composition should still be denied
-        assert_eq!(evaluate("git status | grep modified"), Verdict::Deny);
-        
+        assert!(evaluate("git status | grep modified").is_deny());
+
         // Safe command with redirect should be denied
-        assert_eq!(evaluate("pwd > output.txt"), Verdict::Deny);
+        assert!(evaluate("pwd > output.txt").is_deny());
     }
 }

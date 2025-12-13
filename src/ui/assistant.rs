@@ -54,7 +54,6 @@ pub enum ChatMessage {
         explanation: String,
         status: CommandStatus,
         verdict: Verdict,
-        reason: Option<String>,
     },
     /// An error message from the system
     Error { text: String },
@@ -97,8 +96,8 @@ pub struct TuiAssistant {
     pending_command_idx: Option<usize>,
 
     // Multi-command suggestion state
-    /// All pending commands from the AI (command, explanation)
-    pending_commands: Vec<(String, String)>,
+    /// All pending commands from the AI (command, explanation, verdict)
+    pending_commands: Vec<(String, String, Verdict)>,
     /// Currently displayed suggestion index (0-based, for cycling through suggestions)
     current_suggestion_idx: usize,
 
@@ -304,46 +303,55 @@ impl TuiAssistant {
         }
     }
 
-    /// Add a command suggestion card
+    /// Add a command suggestion card (evaluates verdict automatically)
     pub fn push_command_card(&mut self, command: String, explanation: String) {
-        // Evaluate command security
         let verdict = crate::security::evaluate(&command);
-        let reason = match verdict {
-            Verdict::Allow => None,
-            Verdict::RequireConfirmation => Some("Requires confirmation".to_string()),
-            Verdict::Deny => Some("Contains dangerous shell operators".to_string()),
-        };
-        
+        self.push_command_card_with_verdict(command, explanation, verdict);
+    }
+
+    /// Add a command suggestion card with pre-evaluated verdict
+    fn push_command_card_with_verdict(
+        &mut self,
+        command: String,
+        explanation: String,
+        verdict: Verdict,
+    ) {
         let idx = self.messages.len();
         self.messages.push(ChatMessage::CommandCard {
             command,
             explanation,
             status: CommandStatus::Pending,
             verdict,
-            reason,
         });
         self.pending_command_idx = Some(idx);
         self.scroll_to_bottom();
     }
 
     /// Set multiple pending commands from AI response.
-    /// Only displays the first command card; user can cycle through with Ctrl+/.
+    /// Only displays the first command card; user can cycle through with Ctrl+A.
+    /// Pre-evaluates verdict for all commands.
     pub fn set_pending_commands(&mut self, commands: Vec<(String, String)>) {
         if commands.is_empty() {
             return;
         }
 
-        // Store all commands
-        self.pending_commands = commands;
+        // Pre-evaluate verdict for all commands and store
+        self.pending_commands = commands
+            .into_iter()
+            .map(|(cmd, exp)| {
+                let verdict = crate::security::evaluate(&cmd);
+                (cmd, exp, verdict)
+            })
+            .collect();
         self.current_suggestion_idx = 0;
 
         // Add a command card for the first command
-        let (command, explanation) = self.pending_commands[0].clone();
-        self.push_command_card(command, explanation);
+        let (command, explanation, verdict) = self.pending_commands[0].clone();
+        self.push_command_card_with_verdict(command, explanation, verdict);
     }
 
     /// Cycle to the next command suggestion (wraps around).
-    /// Updates the displayed command card.
+    /// Updates the displayed command card with pre-stored verdict.
     pub fn cycle_suggestion(&mut self) {
         if self.pending_commands.len() <= 1 {
             return; // Nothing to cycle
@@ -352,12 +360,13 @@ impl TuiAssistant {
         // Move to next suggestion (wrap around)
         self.current_suggestion_idx = (self.current_suggestion_idx + 1) % self.pending_commands.len();
 
-        // Update the displayed command card
+        // Update the displayed command card with stored verdict
         if let Some(idx) = self.pending_command_idx {
-            if let Some(ChatMessage::CommandCard { command, explanation, .. }) = self.messages.get_mut(idx) {
-                let (new_cmd, new_exp) = &self.pending_commands[self.current_suggestion_idx];
+            if let Some(ChatMessage::CommandCard { command, explanation, verdict, .. }) = self.messages.get_mut(idx) {
+                let (new_cmd, new_exp, new_verdict) = &self.pending_commands[self.current_suggestion_idx];
                 *command = new_cmd.clone();
                 *explanation = new_exp.clone();
+                *verdict = new_verdict.clone();
             }
         }
     }
@@ -405,19 +414,22 @@ impl TuiAssistant {
     pub fn confirm_command(&mut self) -> Option<String> {
         if let Some(idx) = self.pending_command_idx.take() {
             if let Some(ChatMessage::CommandCard { command, status, verdict, .. }) =
-                self.messages.get_mut(idx)
-            {
+                self.messages.get_mut(idx) {
                 // Verdict gating: only Allow and RequireConfirmation can execute
-                match verdict {
-                    Verdict::Allow | Verdict::RequireConfirmation => {
-                        *status = CommandStatus::Executed;
-                        return Some(command.clone());
-                    }
-                    Verdict::Deny => {
-                        // Deny verdict: do not execute, just clear pending state
-                        *status = CommandStatus::Rejected;
-                        return None;
-                    }
+                if verdict.is_allowed() {
+                    *status = CommandStatus::Executed;
+                    let result = command.clone();
+                    // Clear multi-command state
+                    self.pending_commands.clear();
+                    self.current_suggestion_idx = 0;
+                    return Some(result);
+                } else {
+                    // Deny verdict: do not execute, just clear pending state
+                    *status = CommandStatus::Rejected;
+                    // Clear multi-command state
+                    self.pending_commands.clear();
+                    self.current_suggestion_idx = 0;
+                    return None;
                 }
             }
         }
@@ -434,6 +446,37 @@ impl TuiAssistant {
         // Clear multi-command state
         self.pending_commands.clear();
         self.current_suggestion_idx = 0;
+    }
+
+    /// Check if the current pending command has a Deny verdict
+    pub fn is_pending_command_denied(&self) -> bool {
+        if let Some(idx) = self.pending_command_idx {
+            if let Some(ChatMessage::CommandCard { verdict, .. }) = self.messages.get(idx) {
+                return verdict.is_deny();
+            }
+        }
+        false
+    }
+
+    /// Copy the pending command to clipboard (for Deny verdict)
+    /// Returns the command string if successful
+    pub fn copy_pending_command(&mut self) -> Option<String> {
+        if let Some(idx) = self.pending_command_idx.take() {
+            if let Some(ChatMessage::CommandCard { command, status, .. }) =
+                self.messages.get_mut(idx) {
+                let cmd = command.clone();
+                if copy_to_clipboard(&cmd) {
+                    *status = CommandStatus::Executed; // "Executed" means "Copied" for Deny
+                } else {
+                    *status = CommandStatus::Rejected;
+                }
+                // Clear multi-command state
+                self.pending_commands.clear();
+                self.current_suggestion_idx = 0;
+                return Some(cmd);
+            }
+        }
+        None
     }
 
     // ========================================================================
@@ -1007,16 +1050,20 @@ impl TuiAssistant {
                     explanation,
                     status,
                     verdict,
-                    reason,
                 } => {
+                    // Show pagination only for pending commands
+                    let pagination = if *status == CommandStatus::Pending {
+                        self.suggestion_pagination()
+                    } else {
+                        None
+                    };
                     all_lines.extend(render_command_card(
                         command,
                         explanation,
                         *status,
-                        *verdict,
-                        reason.as_deref(),
+                        verdict,
                         width,
-                        None,
+                        pagination
                     ));
                     all_lines.push(Line::raw(""));
                 }
@@ -1762,16 +1809,20 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
                 explanation,
                 status,
                 verdict,
-                reason,
             } => {
+                // Show pagination only for pending commands
+                let pagination = if *status == CommandStatus::Pending {
+                    assistant.suggestion_pagination()
+                } else {
+                    None
+                };
                 all_lines.extend(render_command_card(
                     command,
                     explanation,
                     *status,
-                    *verdict,
-                    reason.as_deref(),
+                    verdict,
                     area.width,
-                    None,
+                    pagination
                 ));
                 all_lines.push(Line::raw("")); // Empty line after card
             }
@@ -1915,8 +1966,7 @@ fn render_command_card(
     command: &str,
     explanation: &str,
     status: CommandStatus,
-    verdict: Verdict,
-    reason: Option<&str>,
+    verdict: &Verdict,
     width: u16,
     pagination: Option<(usize, usize)>,
 ) -> Vec<Line<'static>> {
@@ -1924,11 +1974,22 @@ fn render_command_card(
     //       but now it only renders one line.
     let mut lines = Vec::new();
 
-    // Determine border color and verdict label based on verdict
-    let (border_color, verdict_label, verdict_style) = match verdict {
-        Verdict::Allow => (Color::Green, "✓ Allow", Style::default().fg(Color::Green)),
-        Verdict::RequireConfirmation => (Color::Yellow, "⚠ Confirm", Style::default().fg(Color::Yellow)),
-        Verdict::Deny => (Color::Red, "✗ Deny", Style::default().fg(Color::Red).bold()),
+    // Determine verdict label and style based on verdict
+    let (verdict_label, verdict_style) = match verdict {
+        Verdict::Allow => ("✓ Allow", Style::default().fg(Color::Green)),
+        Verdict::RequireConfirmation(_) => ("⚠ Confirm", Style::default().fg(Color::Yellow)),
+        Verdict::Deny(_) => ("✗ Deny", Style::default().fg(Color::Red).bold()),
+    };
+
+    // Determine border color based on status (overrides verdict color when not pending)
+    let border_color = match status {
+        CommandStatus::Executed => Color::Cyan,
+        CommandStatus::Rejected => Color::Red,
+        CommandStatus::Pending => match verdict {
+            Verdict::Allow => Color::Green,
+            Verdict::RequireConfirmation(_) => Color::Yellow,
+            Verdict::Deny(_) => Color::Red,
+        },
     };
 
     let card_width = (width as usize).saturating_sub(4).max(20);
@@ -1940,20 +2001,25 @@ fn render_command_card(
         String::new()
     };
 
-    let top_border = if title.is_empty() {
-        format!(" ┌{}┐", "─".repeat(card_width))
+    let border_style = Style::default().fg(border_color);
+    if title.is_empty() {
+        let top_border = format!(" ┌{}┐", "─".repeat(card_width));
+        lines.push(Line::from(vec![Span::styled(top_border, border_style)]));
     } else {
         // Center the title in the top border
         let title_len = title.chars().count();
         let remaining = card_width.saturating_sub(title_len);
         let left_dashes = remaining / 2;
         let right_dashes = remaining - left_dashes;
-        format!(" ┌{}{}{}┐", "─".repeat(left_dashes), title, "─".repeat(right_dashes))
-    };
-    lines.push(Line::styled(top_border, Style::default().fg(border_color)));
+        lines.push(Line::from(vec![
+            Span::styled(format!(" ┌{}", "─".repeat(left_dashes)), border_style),
+            Span::styled(title, border_style),
+            Span::styled(format!("{}┐", "─".repeat(right_dashes)), border_style),
+        ]));
+    }
 
     // Verdict line with reason
-    let verdict_text = if let Some(r) = reason {
+    let verdict_text = if let Some(r) = verdict.reason() {
         format!("{}: {}", verdict_label, r)
     } else {
         verdict_label.to_string()
@@ -1968,10 +2034,11 @@ fn render_command_card(
     // Explanation line (if not empty)
     if !explanation.is_empty() {
         let exp_line = format_card_line(explanation, card_width);
-        lines.push(Line::styled(
-            format!(" │{}│", exp_line),
-            Style::default().fg(border_color),
-        ));
+        lines.push(Line::from(vec![
+            Span::styled(" │", border_style),
+            Span::styled(exp_line, border_style),
+            Span::styled("│", border_style),
+        ]));
     }
 
     // Command line with $ prefix
@@ -1984,22 +2051,31 @@ fn render_command_card(
     ]));
 
     // Status/action line based on verdict and status
-    let action_text = match (verdict, status) {
-        (Verdict::Deny, CommandStatus::Pending) => "[C] Copy only  [Esc] Cancel",
-        (Verdict::Deny, CommandStatus::Executed) => "Copied",
-        (Verdict::Deny, CommandStatus::Rejected) => "Rejected",
-        (Verdict::Allow, CommandStatus::Pending) => "[Y] Run  [N/Esc] Cancel",
-        (Verdict::Allow, CommandStatus::Executed) => "Executed",
-        (Verdict::Allow, CommandStatus::Rejected) => "Rejected",
-        (Verdict::RequireConfirmation, CommandStatus::Pending) => "[Y] Confirm & Run  [N/Esc] Cancel",
-        (Verdict::RequireConfirmation, CommandStatus::Executed) => "Executed",
-        (Verdict::RequireConfirmation, CommandStatus::Rejected) => "Rejected",
+    let action_text = match (verdict.is_deny(), status) {
+        (true, CommandStatus::Pending) => {
+            if pagination.is_some() {
+                "[Ctrl+A] Next  [Ctrl+Y] Copy  [Ctrl+N] Cancel"
+            } else {
+                "[Ctrl+Y] Copy  [Ctrl+N] Cancel"
+            }
+        }
+        (true, CommandStatus::Executed) => "Copied",
+        (true, CommandStatus::Rejected) => "Rejected",
+        (_, CommandStatus::Executed) => "Executed",
+        (_, CommandStatus::Rejected) => "Rejected",
+        (_, CommandStatus::Pending) => {
+            if pagination.is_some() {
+                "[Ctrl+A] Next  [Ctrl+Y] Execute  [Ctrl+N] Cancel"
+            } else {
+                "[Ctrl+Y] Execute  [Ctrl+N] Cancel"
+            }
+        }
     };
-    
+
     let status_line = format_card_line(action_text, card_width);
     let status_style = match status {
         CommandStatus::Pending => Style::default().fg(border_color),
-        CommandStatus::Executed => Style::default().fg(Color::Green),
+        CommandStatus::Executed => Style::default().fg(Color::Cyan),
         CommandStatus::Rejected => Style::default().fg(Color::Red).dim(),
     };
     lines.push(Line::from(vec![
@@ -2010,7 +2086,7 @@ fn render_command_card(
 
     // Bottom border
     let bottom_border = format!(" └{}┘", "─".repeat(card_width));
-    lines.push(Line::styled(bottom_border, Style::default().fg(border_color)));
+    lines.push(Line::from(vec![Span::styled(bottom_border, border_style)]));
 
     lines
 }
