@@ -93,8 +93,14 @@ pub struct TuiAssistant {
     // Scroll state (0 = at bottom, >0 = scrolled up by N lines)
     scroll_offset: usize,
 
-    // Pending command (index into messages vec)
+    // Pending command (index into messages vec for the first command card)
     pending_command_idx: Option<usize>,
+
+    // Multi-command suggestion state
+    /// All pending commands from the AI (command, explanation)
+    pending_commands: Vec<(String, String)>,
+    /// Currently displayed suggestion index (0-based, for cycling through suggestions)
+    current_suggestion_idx: usize,
 
     // Cached rendering dimensions (updated during render, uses Cell for interior mutability)
     last_input_area_width: Cell<u16>,
@@ -148,6 +154,8 @@ impl TuiAssistant {
             input_cursor: 0,
             scroll_offset: 0,
             pending_command_idx: None,
+            pending_commands: Vec::new(),
+            current_suggestion_idx: 0,
             last_input_area_width: Cell::new(80), // Default value
             max_scroll_offset: Cell::new(0),
             visual_state: None,
@@ -185,14 +193,13 @@ impl TuiAssistant {
             }
             AiUiUpdate::CommandSuggestion {
                 session_id,
-                command,
-                explanation,
+                commands,
             } => {
                 if session_id == self.active_session {
                     // End the streaming message first
                     self.end_stream();
-                    // Then add the command card
-                    self.push_command_card(command, explanation);
+                    // Store all commands and show the first one
+                    self.set_pending_commands(commands);
                 }
             }
         }
@@ -241,6 +248,9 @@ impl TuiAssistant {
             self.messages.clear();
             self.scroll_offset = 0;
             self.pending_command_idx = None;
+            // Clear multi-command state
+            self.pending_commands.clear();
+            self.current_suggestion_idx = 0;
         }
     }
 
@@ -316,6 +326,58 @@ impl TuiAssistant {
         self.scroll_to_bottom();
     }
 
+    /// Set multiple pending commands from AI response.
+    /// Only displays the first command card; user can cycle through with Ctrl+/.
+    pub fn set_pending_commands(&mut self, commands: Vec<(String, String)>) {
+        if commands.is_empty() {
+            return;
+        }
+
+        // Store all commands
+        self.pending_commands = commands;
+        self.current_suggestion_idx = 0;
+
+        // Add a command card for the first command
+        let (command, explanation) = self.pending_commands[0].clone();
+        self.push_command_card(command, explanation);
+    }
+
+    /// Cycle to the next command suggestion (wraps around).
+    /// Updates the displayed command card.
+    pub fn cycle_suggestion(&mut self) {
+        if self.pending_commands.len() <= 1 {
+            return; // Nothing to cycle
+        }
+
+        // Move to next suggestion (wrap around)
+        self.current_suggestion_idx = (self.current_suggestion_idx + 1) % self.pending_commands.len();
+
+        // Update the displayed command card
+        if let Some(idx) = self.pending_command_idx {
+            if let Some(ChatMessage::CommandCard { command, explanation, .. }) = self.messages.get_mut(idx) {
+                let (new_cmd, new_exp) = &self.pending_commands[self.current_suggestion_idx];
+                *command = new_cmd.clone();
+                *explanation = new_exp.clone();
+            }
+        }
+    }
+
+    /// Get the current suggestion index and total count for display.
+    /// Returns (current_index, total_count) where current_index is 1-based.
+    pub fn suggestion_pagination(&self) -> Option<(usize, usize)> {
+        if self.pending_commands.len() <= 1 {
+            None // Don't show pagination for single command
+        } else {
+            Some((self.current_suggestion_idx + 1, self.pending_commands.len()))
+        }
+    }
+
+    /// Get the currently selected suggestion index (0-based).
+    /// Used by the backend to know which command the user accepted.
+    pub fn current_suggestion_index(&self) -> usize {
+        self.current_suggestion_idx
+    }
+
     /// Get all messages in the current session
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
@@ -369,6 +431,9 @@ impl TuiAssistant {
                 *status = CommandStatus::Rejected;
             }
         }
+        // Clear multi-command state
+        self.pending_commands.clear();
+        self.current_suggestion_idx = 0;
     }
 
     // ========================================================================
@@ -951,6 +1016,7 @@ impl TuiAssistant {
                         *verdict,
                         reason.as_deref(),
                         width,
+                        None,
                     ));
                     all_lines.push(Line::raw(""));
                 }
@@ -1705,6 +1771,7 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
                     *verdict,
                     reason.as_deref(),
                     area.width,
+                    None,
                 ));
                 all_lines.push(Line::raw("")); // Empty line after card
             }
@@ -1843,6 +1910,7 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
 }
 
 /// Render a command suggestion card
+/// `pagination` is Some((current, total)) for multi-command display, None for single command or history
 fn render_command_card(
     command: &str,
     explanation: &str,
@@ -1850,6 +1918,7 @@ fn render_command_card(
     verdict: Verdict,
     reason: Option<&str>,
     width: u16,
+    pagination: Option<(usize, usize)>,
 ) -> Vec<Line<'static>> {
     // TODO: the explanation could contains more than one single line,
     //       but now it only renders one line.
@@ -1864,8 +1933,23 @@ fn render_command_card(
 
     let card_width = (width as usize).saturating_sub(4).max(20);
 
-    // Top border
-    let top_border = format!(" ┌{}┐", "─".repeat(card_width));
+    // Top border with pagination indicator
+    let title = if let Some((current, total)) = pagination {
+        format!(" Suggestion ({}/{}) ", current, total)
+    } else {
+        String::new()
+    };
+
+    let top_border = if title.is_empty() {
+        format!(" ┌{}┐", "─".repeat(card_width))
+    } else {
+        // Center the title in the top border
+        let title_len = title.chars().count();
+        let remaining = card_width.saturating_sub(title_len);
+        let left_dashes = remaining / 2;
+        let right_dashes = remaining - left_dashes;
+        format!(" ┌{}{}{}┐", "─".repeat(left_dashes), title, "─".repeat(right_dashes))
+    };
     lines.push(Line::styled(top_border, Style::default().fg(border_color)));
 
     // Verdict line with reason

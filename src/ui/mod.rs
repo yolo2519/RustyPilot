@@ -185,7 +185,7 @@ fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
 fn render_command_mode_hint(screen_area: Rect, buf: &mut Buffer, fg_color: Color, extra_hints: impl IntoIterator<Item = (String, String)>) {
     let mut lines: Vec<(String, String)> = vec![
         (" N".into(), "Toggle active pane".into()),
-        (" C".into(), "Exit program".into()),
+        (" Q".into(), "Exit program".into()),
         (" L".into(), "Force redraw (clear screen)".into()),
         (" <Any>".into(),"Quit command mode".into())
     ];
