@@ -30,7 +30,7 @@ pub fn handle_key_event(
     if ai_sessions.has_pending_suggestion(session_id) {
         match key_evt.code {
             KeyCode::Char('y') | KeyCode::Char('Y')
-                if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>
+            if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 // Update backend state first (marks suggestion as Accepted)
                 // accept_suggestion returns the command string
@@ -40,14 +40,14 @@ pub fn handle_key_event(
 
                     // Tell the session manager to execute the suggested command
                     // It will send the ExecuteAiCommand event to the app layer
+                    // Security gating happens in app.rs try_execute_suggested()
                     ai_sessions.execute_suggestion(session_id, command)?;
                 }
 
                 return Ok(());
             }
             KeyCode::Char('n') | KeyCode::Char('N')
-                if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+            if key_evt.modifiers.contains(KeyModifiers::CONTROL) =>{
                 // Update backend state first (marks suggestion as Rejected)
                 ai_sessions.reject_suggestion(session_id);
                 // Update UI
