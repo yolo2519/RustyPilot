@@ -33,28 +33,25 @@ pub enum ExecutionDecision {
 /// use rusty_term::security::{Verdict, executor::{gate_command, ExecutionDecision}};
 ///
 /// // Safe command - execute immediately
-/// let decision = gate_command("ls -la", Verdict::Allow);
+/// let decision = gate_command("ls -la", &Verdict::Allow);
 /// assert_eq!(decision, ExecutionDecision::Execute);
 ///
 /// // Requires confirmation
-/// let decision = gate_command("rm file.txt", Verdict::RequireConfirmation);
+/// let decision = gate_command("rm file.txt", &Verdict::RequireConfirmation("Requires confirmation".to_string()));
 /// assert!(matches!(decision, ExecutionDecision::RequireConfirmation { .. }));
 ///
 /// // Dangerous command - deny
-/// let decision = gate_command("ls | grep", Verdict::Deny);
+/// let decision = gate_command("ls | grep", &Verdict::Deny("Contains dangerous shell operators".to_string()));
 /// assert!(matches!(decision, ExecutionDecision::Deny { .. }));
 /// ```
-pub fn gate_command(cmd: &str, verdict: Verdict) -> ExecutionDecision {
+pub fn gate_command(cmd: &str, verdict: &Verdict) -> ExecutionDecision {
     match verdict {
         Verdict::Allow => ExecutionDecision::Execute,
-        Verdict::RequireConfirmation => ExecutionDecision::RequireConfirmation {
-            reason: format!("Command '{}' requires user confirmation before execution", cmd),
+        Verdict::RequireConfirmation(reason) => ExecutionDecision::RequireConfirmation {
+            reason: format!("Command '{}': {}", cmd, reason),
         },
-        Verdict::Deny => ExecutionDecision::Deny {
-            reason: format!(
-                "Command '{}' contains dangerous shell operators and cannot be executed",
-                cmd
-            ),
+        Verdict::Deny(reason) => ExecutionDecision::Deny {
+            reason: format!("Command '{}': {}", cmd, reason),
         },
     }
 }
@@ -65,20 +62,20 @@ mod tests {
 
     #[test]
     fn test_gate_allow_verdict() {
-        let decision = gate_command("pwd", Verdict::Allow);
+        let decision = gate_command("pwd", &Verdict::Allow);
         assert_eq!(decision, ExecutionDecision::Execute);
 
-        let decision = gate_command("ls -la", Verdict::Allow);
+        let decision = gate_command("ls -la", &Verdict::Allow);
         assert_eq!(decision, ExecutionDecision::Execute);
     }
 
     #[test]
     fn test_gate_require_confirmation_verdict() {
-        let decision = gate_command("rm file.txt", Verdict::RequireConfirmation);
+        let verdict = Verdict::RequireConfirmation("Requires confirmation".to_string());
+        let decision = gate_command("rm file.txt", &verdict);
         match decision {
             ExecutionDecision::RequireConfirmation { reason } => {
                 assert!(reason.contains("rm file.txt"));
-                assert!(reason.contains("requires user confirmation"));
             }
             _ => panic!("Expected RequireConfirmation decision"),
         }
@@ -86,11 +83,11 @@ mod tests {
 
     #[test]
     fn test_gate_deny_verdict() {
-        let decision = gate_command("ls | grep test", Verdict::Deny);
+        let verdict = Verdict::Deny("Contains dangerous shell operators".to_string());
+        let decision = gate_command("ls | grep test", &verdict);
         match decision {
             ExecutionDecision::Deny { reason } => {
                 assert!(reason.contains("ls | grep test"));
-                assert!(reason.contains("dangerous shell operators"));
             }
             _ => panic!("Expected Deny decision"),
         }
@@ -98,49 +95,40 @@ mod tests {
 
     #[test]
     fn test_gate_all_verdicts() {
-        let test_cases = vec![
-            ("pwd", Verdict::Allow, ExecutionDecision::Execute),
-            (
-                "cat file",
-                Verdict::RequireConfirmation,
-                ExecutionDecision::RequireConfirmation {
-                    reason: "Command 'cat file' requires user confirmation before execution"
-                        .to_string(),
-                },
-            ),
-            (
-                "rm -rf /",
-                Verdict::Deny,
-                ExecutionDecision::Deny {
-                    reason: "Command 'rm -rf /' contains dangerous shell operators and cannot be executed".to_string(),
-                },
-            ),
-        ];
+        // Allow verdict
+        let decision = gate_command("pwd", &Verdict::Allow);
+        assert_eq!(decision, ExecutionDecision::Execute);
 
-        for (cmd, verdict, expected) in test_cases {
-            let decision = gate_command(cmd, verdict);
-            assert_eq!(decision, expected, "Failed for command: {}", cmd);
-        }
+        // RequireConfirmation verdict
+        let verdict = Verdict::RequireConfirmation("Requires confirmation".to_string());
+        let decision = gate_command("cat file", &verdict);
+        assert!(matches!(decision, ExecutionDecision::RequireConfirmation { .. }));
+
+        // Deny verdict
+        let verdict = Verdict::Deny("Dangerous".to_string());
+        let decision = gate_command("rm -rf /", &verdict);
+        assert!(matches!(decision, ExecutionDecision::Deny { .. }));
     }
 
     #[test]
     fn test_gate_empty_command() {
-        let decision = gate_command("", Verdict::Deny);
+        let verdict = Verdict::Deny("Empty command".to_string());
+        let decision = gate_command("", &verdict);
         assert!(matches!(decision, ExecutionDecision::Deny { .. }));
     }
 
     #[test]
     fn test_gate_complex_commands() {
         // Git commands
-        let decision = gate_command("git status", Verdict::Allow);
+        let decision = gate_command("git status", &Verdict::Allow);
         assert_eq!(decision, ExecutionDecision::Execute);
 
-        let decision = gate_command("git push", Verdict::Deny);
+        let verdict = Verdict::Deny("git push is destructive".to_string());
+        let decision = gate_command("git push", &verdict);
         assert!(matches!(decision, ExecutionDecision::Deny { .. }));
 
         // Commands with arguments
-        let decision = gate_command("echo 'hello world'", Verdict::Allow);
+        let decision = gate_command("echo 'hello world'", &Verdict::Allow);
         assert_eq!(decision, ExecutionDecision::Execute);
     }
 }
-
