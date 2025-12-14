@@ -60,7 +60,6 @@ pub struct App {
     exit: bool,  // Should the app exit?
     command_mode: bool,  // Is the app in the command mode?
     force_redraw_flag: bool,  // Should force a full screen clear and redraw?
-    needs_draw: bool,
     next_frame_deadline: Option<Instant>,
 
     // Mouse drag state for visual selection
@@ -122,7 +121,6 @@ impl App {
             separator_drag_state: None,
             last_click: None,
             shell_input_buffer: String::new(),
-            needs_draw: false,
             next_frame_deadline: None,
             layout_builder,
             layout: initial_layout,
@@ -288,8 +286,6 @@ impl App {
 
 
     fn request_draw(&mut self, asap: bool) {
-        self.needs_draw = true;
-
         // Cap redraw rate for performance.
         // Terminal rendering is relatively expensive, and we can easily receive bursts
         // of PTY output / AI stream chunks.
@@ -339,7 +335,7 @@ impl App {
                     // PTY output is handled internally by TuiTerminal
                     self.request_draw(false);
                 }
-                _ = tokio::time::sleep_until(self.next_frame_deadline.unwrap_or_else(Instant::now)), if self.needs_draw => {
+                _ = tokio::time::sleep_until(self.next_frame_deadline.unwrap_or_else(Instant::now)), if self.next_frame_deadline.is_some() => {
                     // Check if force redraw is needed (e.g., after stderr pollution)
                     if self.force_redraw_flag {
                         self.force_redraw_flag = false;
@@ -347,7 +343,6 @@ impl App {
                     } else {
                         self.draw(terminal)?;
                     }
-                    self.needs_draw = false;
                     self.next_frame_deadline = None;
                 }
             }
