@@ -9,7 +9,7 @@
 /// # Examples
 ///
 /// ```
-/// use crate::utils::context::Context;
+/// use rusty_term::utils::context::Context;
 ///
 /// // Create a context with cleanup function
 /// let _guard = Context::with(|| {

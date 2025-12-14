@@ -28,6 +28,7 @@
 //!         env_vars: vec![],
 //!         recent_history: vec![],
 //!         recent_output: vec![],
+//!         recent_commands: vec![],
 //!     };
 //!
 //!     let session_id = manager.current_session_id();
