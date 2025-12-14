@@ -71,6 +71,11 @@ impl AiClient {
             .messages(vec![user_msg])
             .build()?;
 
+        // Log the request JSON
+        if let Ok(request_json) = serde_json::to_string_pretty(&request) {
+            tracing::info!("Sending request to OpenAI API (non-streaming): {}", request_json);
+        }
+
         // Send request
         let response = self.client.chat().create(request).await?;
 
@@ -109,6 +114,11 @@ impl AiClient {
             .model(&self.model)
             .messages(vec![user_msg])
             .build()?;
+
+        // Log the request JSON
+        if let Ok(request_json) = serde_json::to_string_pretty(&request) {
+            tracing::info!("Sending request to OpenAI API (streaming): {}", request_json);
+        }
 
         // Create stream
         let mut stream = self.client.chat().create_stream(request).await?;

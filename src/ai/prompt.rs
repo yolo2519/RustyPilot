@@ -72,6 +72,16 @@ pub struct PromptContext {
     /// Recent terminal output
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub recent_output: Vec<String>,
+    /// Recent commands with their outputs
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub recent_commands: Vec<CommandWithOutput>,
+}
+
+/// A command with its output for context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandWithOutput {
+    pub command: String,
+    pub output: String,
 }
 
 /// Build a complete prompt for the AI including context and user query.
@@ -83,6 +93,16 @@ pub struct PromptContext {
 ///
 /// Returns an error if JSON serialization fails (should be extremely rare).
 pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> Result<String, serde_json::Error> {
+    // Convert command records to the format expected by PromptContext
+    let recent_commands: Vec<CommandWithOutput> = ctx
+        .recent_commands
+        .iter()
+        .map(|record| CommandWithOutput {
+            command: record.command_line.clone(),
+            output: truncate_text(&record.output, 2048),
+        })
+        .collect();
+
     let prompt = UserPrompt {
         user_request: user_query.to_string(),
         context: PromptContext {
@@ -90,10 +110,33 @@ pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> Result<String, s
             env: ctx.env_vars.clone(),
             recent_history: ctx.recent_history.clone(),
             recent_output: ctx.recent_output.iter().rev().take(6).rev().cloned().collect(),
+            recent_commands,
         },
     };
 
     serde_json::to_string_pretty(&prompt)
+}
+
+/// Truncate text to a maximum number of bytes, preserving UTF-8 boundaries.
+fn truncate_text(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    
+    // Find the last valid UTF-8 character boundary within max_bytes
+    if let Some((idx, _)) = text
+        .char_indices()
+        .take_while(|(i, _)| *i < max_bytes)
+        .last()
+    {
+        let mut result = text[..=idx].to_string();
+        if idx < text.len() - 1 {
+            result.push_str("...[truncated]");
+        }
+        result
+    } else {
+        String::new()
+    }
 }
 
 /// Extract the original user request from a JSON-formatted prompt.
@@ -128,6 +171,8 @@ mod tests {
 
     #[test]
     fn test_build_prompt_basic() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::context::CommandRecord;
+        
         let ctx = ContextSnapshot {
             cwd: "/home/user/projects".to_string(),
             env_vars: vec![
@@ -136,6 +181,12 @@ mod tests {
             ],
             recent_history: vec!["ls -la".to_string(), "cd projects".to_string()],
             recent_output: vec!["output line".to_string()],
+            recent_commands: vec![
+                CommandRecord {
+                    command_line: "ls -la".to_string(),
+                    output: "total 8\ndrwxr-xr-x  3 user  staff  96 Dec 13 10:00 .\n".to_string(),
+                },
+            ],
         };
 
         let prompt = build_prompt("list all files", &ctx)?;
@@ -145,6 +196,8 @@ mod tests {
         assert_eq!(parsed.user_request, "list all files");
         assert_eq!(parsed.context.cwd, "/home/user/projects");
         assert!(parsed.context.recent_output.contains(&"output line".to_string()));
+        assert_eq!(parsed.context.recent_commands.len(), 1);
+        assert_eq!(parsed.context.recent_commands[0].command, "ls -la");
         Ok(())
     }
 
@@ -155,6 +208,7 @@ mod tests {
             env_vars: vec![],
             recent_history: vec![],
             recent_output: vec![],
+            recent_commands: vec![],
         };
 
         let prompt = build_prompt("help me", &ctx)?;
@@ -162,6 +216,7 @@ mod tests {
         let parsed: UserPrompt = serde_json::from_str(&prompt)?;
         assert_eq!(parsed.user_request, "help me");
         assert_eq!(parsed.context.cwd, "/");
+        assert_eq!(parsed.context.recent_commands.len(), 0);
         Ok(())
     }
 
@@ -172,6 +227,7 @@ mod tests {
             env_vars: vec![],
             recent_history: vec![],
             recent_output: vec![],
+            recent_commands: vec![],
         };
 
         let prompt = build_prompt("find large files", &ctx)?;
@@ -188,6 +244,7 @@ mod tests {
             env_vars: vec![],
             recent_history: vec![],
             recent_output: vec![],
+            recent_commands: vec![],
         };
 
         // Test with special characters that need JSON escaping

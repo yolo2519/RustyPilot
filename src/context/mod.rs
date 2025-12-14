@@ -4,10 +4,12 @@
 //! shell session including working directory, environment variables, and command
 //! history to enhance AI command suggestions.
 
+mod command_log;
 mod cwd;
 mod env;
 mod history;
 
+pub use command_log::{CommandLog, CommandRecord};
 pub use cwd::CurrentDir;
 pub use env::Environment;
 pub use history::History;
@@ -44,6 +46,18 @@ impl ContextManager {
             env_vars: self.env.filtered_vars(),
             recent_history: self.history.recent(20),
             recent_output: self.recent_output.iter().cloned().collect(),
+            recent_commands: Vec::new(), // Filled by caller with ShellManager data
+        }
+    }
+
+    /// Create a snapshot with command records from ShellManager.
+    pub fn snapshot_with_commands(&self, command_records: Vec<CommandRecord>) -> ContextSnapshot {
+        ContextSnapshot {
+            cwd: self.cwd.path.clone(),
+            env_vars: self.env.filtered_vars(),
+            recent_history: self.history.recent(20),
+            recent_output: self.recent_output.iter().cloned().collect(),
+            recent_commands: command_records,
         }
     }
 
@@ -91,6 +105,8 @@ pub struct ContextSnapshot {
     pub env_vars: Vec<(String, String)>,
     pub recent_history: Vec<String>,
     pub recent_output: Vec<String>,
+    /// Recent commands with their outputs (command_line, output)
+    pub recent_commands: Vec<CommandRecord>,
 }
 
 impl ContextSnapshot {
@@ -101,8 +117,20 @@ impl ContextSnapshot {
         // Current directory
         result.push_str(&format!("Current directory: {}\n", self.cwd));
         
-        // Recent history (if any)
-        if !self.recent_history.is_empty() {
+        // Recent commands with outputs (if any)
+        if !self.recent_commands.is_empty() {
+            result.push_str("\nRecent commands and outputs:\n");
+            for record in &self.recent_commands {
+                result.push_str(&format!("\n$ {}\n", record.command_line));
+                // Truncate output to reasonable size (max ~2KB per command)
+                let output_preview = truncate_output(&record.output, 2048);
+                if !output_preview.is_empty() {
+                    result.push_str(&output_preview);
+                    result.push('\n');
+                }
+            }
+        } else if !self.recent_history.is_empty() {
+            // Fallback to history if no command records
             result.push_str("\nRecent commands:\n");
             for (i, cmd) in self.recent_history.iter().rev().take(5).enumerate() {
                 result.push_str(&format!("  {}. {}\n", i + 1, cmd));
@@ -118,5 +146,25 @@ impl ContextSnapshot {
         }
         
         result
+    }
+}
+
+/// Truncate output to a maximum size, keeping the last N bytes.
+/// Adds ellipsis if truncated.
+fn truncate_output(output: &str, max_bytes: usize) -> String {
+    if output.len() <= max_bytes {
+        output.to_string()
+    } else {
+        // Take last max_bytes characters (might cut in middle of UTF-8 char, so be careful)
+        let truncated = if let Some((idx, _)) = output
+            .char_indices()
+            .rev()
+            .find(|(i, _)| output.len() - i <= max_bytes)
+        {
+            &output[idx..]
+        } else {
+            output
+        };
+        format!("...\n{}", truncated)
     }
 }

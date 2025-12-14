@@ -60,6 +60,7 @@ async fn main() -> Result<()> {
             "git status".to_string(),
         ],
         recent_output: vec![],
+        recent_commands: vec![], // Empty for demo, in real app this comes from ShellManager
     };
 
     println!("Context:");
