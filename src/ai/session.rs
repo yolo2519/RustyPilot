@@ -9,6 +9,7 @@
 //! The `suggest_command` tool is defined and AI will use it to suggest shell commands.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_openai::error::OpenAIError;
 use async_openai::types::{
@@ -20,7 +21,8 @@ use async_openai::types::{
 use async_openai::Client;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender};
+use tokio::sync::{mpsc::{Receiver, Sender, UnboundedSender}, Mutex};
+use tokio::time::{Duration, Instant};
 use tracing::error;
 
 use crate::context::ContextSnapshot;
@@ -32,6 +34,44 @@ use super::prompt;
 pub type SessionId = u64;
 
 const MAX_HISTORY_MESSAGES: usize = 50;
+const SHELL2_TTL: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Default)]
+struct Shell2Cache {
+    last: Option<Shell2CacheEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct Shell2CacheEntry {
+    at: Instant,
+    cwd: String,
+    text: String,
+}
+
+fn should_force_shell2_refresh(user_input: &str) -> bool {
+    let s = user_input.to_ascii_lowercase();
+    // Intent-ish keywords: when user asks about environment/repo/files, refresh shell2 even if TTL is valid.
+    // Keep this conservative to avoid unnecessary shell2 runs.
+    [
+        "repo",
+        "repository",
+        "git",
+        "branch",
+        "status",
+        "diff",
+        "files",
+        "folder",
+        "directory",
+        "pwd",
+        "where am i",
+        "what's in",
+        "whats in",
+        "list",
+        "ls",
+    ]
+    .iter()
+    .any(|k| s.contains(k))
+}
 
 // =============================================================================
 // Tool Definitions
@@ -262,6 +302,7 @@ pub struct AiSessionManager {
     app_event_tx: UnboundedSender<AppEvent>,
     client: Client<async_openai::config::OpenAIConfig>,
     model: String,
+    shell2_cache: Arc<Mutex<Shell2Cache>>,
 }
 
 impl AiSessionManager {
@@ -286,6 +327,7 @@ impl AiSessionManager {
             app_event_tx,
             client: Client::new(),
             model: model.into(),
+            shell2_cache: Arc::new(Mutex::new(Shell2Cache::default())),
         };
         manager.sessions.insert(1, AiSession::new(1, system_prompt)?);
         Ok(manager)
@@ -689,6 +731,8 @@ impl AiSessionManager {
         // Build OpenAI request with tools
         let base_messages = session.conversation_history.clone();
         let model = self.model.clone();
+        let shell2_cache = self.shell2_cache.clone();
+        let force_shell2_refresh = should_force_shell2_refresh(user_input);
 
         // Log the request JSON
         if let Ok(request_json) = serde_json::to_string_pretty(&request) {
@@ -703,7 +747,35 @@ impl AiSessionManager {
         // Spawn async task to handle streaming
         tokio::spawn(async move {
             // Shell2: collect extra system context (best-effort) before the network call.
-            let shell2_ctx = collect_shell2_system_context(&context).await;
+            // Use TTL cache to avoid spawning subprocesses too frequently.
+            let now = Instant::now();
+            let cwd = context.cwd.clone();
+
+            let cached = {
+                let cache = shell2_cache.lock().await;
+                cache.last.as_ref().and_then(|e| {
+                    let is_fresh = now.duration_since(e.at) < SHELL2_TTL;
+                    let same_cwd = e.cwd == cwd;
+                    if is_fresh && same_cwd && !force_shell2_refresh {
+                        Some(e.text.clone())
+                    } else {
+                        None
+                    }
+                })
+            };
+
+            let shell2_ctx = if let Some(text) = cached {
+                text
+            } else {
+                let text = collect_shell2_system_context(&context).await;
+                let mut cache = shell2_cache.lock().await;
+                cache.last = Some(Shell2CacheEntry {
+                    at: now,
+                    cwd,
+                    text: text.clone(),
+                });
+                text
+            };
 
             // Build the OpenAI request messages:
             // - include the persisted conversation history
