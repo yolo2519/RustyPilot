@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::UserEvent;
 use crate::ai::session::AiSessionManager;
+use crate::shell::ShellManager;
 use crate::ui::assistant::TuiAssistant;
 
 /// Handle key events when the Assistant pane is active.
@@ -18,10 +19,12 @@ use crate::ui::assistant::TuiAssistant;
 /// * `ai_sessions` - The AI session manager (authoritative source for command suggestions)
 /// * `key_evt` - The key event to handle
 /// * `context_manager` - Current shell context for AI requests
+/// * `shell_manager` - Shell manager for accessing command history
 pub fn handle_key_event(
     assistant: &mut TuiAssistant,
     ai_sessions: &mut AiSessionManager,
     context_manager: &crate::context::ContextManager,
+    shell_manager: &ShellManager,
     key_evt: KeyEvent,
 ) -> Result<()> {
     let session_id = assistant.active_session_id();
@@ -140,7 +143,9 @@ pub fn handle_key_event(
                 assistant.push_user_message(input.clone());
                 assistant.start_assistant_message();
                 // Send to AI backend - response will come through ai_stream channel
-                let context = context_manager.snapshot();
+                // Include recent command records from ShellManager (max 10)
+                let command_records = shell_manager.recent_command_records(10);
+                let context = context_manager.snapshot_with_commands(command_records);
                 ai_sessions.send_message(session_id, &input, context);
             }
         }

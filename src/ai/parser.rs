@@ -8,7 +8,7 @@ use super::client::AiCommandSuggestion;
 /// Parse a command suggestion from AI response text.
 ///
 /// Looks for patterns like:
-/// ```
+/// ```text
 /// COMMAND: ls -la
 /// EXPLANATION: Lists all files in long format
 /// ALTERNATIVES: ls -lh, ll

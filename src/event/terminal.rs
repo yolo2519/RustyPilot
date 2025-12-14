@@ -11,14 +11,17 @@ use crate::shell::ShellManager;
 /// Handle key events when the Terminal pane is active.
 ///
 /// This function processes keyboard input for the terminal emulator,
-/// forwarding keystrokes to the PTY.
+/// forwarding keystrokes to the PTY and tracking command input.
 pub fn handle_key_event(
     terminal: &mut TuiTerminal,
     shell: &mut ShellManager,
     key_evt: KeyEvent,
+    shell_input_buffer: &mut String,
 ) -> Result<()> {
     let KeyEvent { code, modifiers, .. } = key_evt;
     let shift = modifiers.contains(KeyModifiers::SHIFT);
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    let alt = modifiers.contains(KeyModifiers::ALT);
 
     // Handle scrolling with Shift + PageUp/PageDown/Up/Down
     if shift {
@@ -55,6 +58,38 @@ pub fn handle_key_event(
         }
     }
 
+    // Track shell input for command logging (basic tracking)
+    // Only track printable characters and common editing keys
+    if !ctrl && !alt {
+        match code {
+            KeyCode::Char(c) => {
+                shell_input_buffer.push(c);
+            }
+            KeyCode::Backspace => {
+                shell_input_buffer.pop();
+            }
+            KeyCode::Enter => {
+                // Record command in log if non-empty
+                let cmd = shell_input_buffer.trim();
+                if !cmd.is_empty() {
+                    shell.start_new_command(cmd.to_string());
+                }
+                // Clear buffer after Enter
+                shell_input_buffer.clear();
+            }
+            _ => {}
+        }
+    } else if ctrl {
+        // Ctrl+C, Ctrl+D, etc. might interrupt command
+        // Clear buffer on Ctrl+C or Ctrl+U (common line kill)
+        match code {
+            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('u') | KeyCode::Char('U') => {
+                shell_input_buffer.clear();
+            }
+            _ => {}
+        }
+    }
+
     // Convert key event to bytes and forward to shell
     let bytes = key_to_bytes(key_evt);
     if !bytes.is_empty() {
@@ -70,6 +105,7 @@ pub fn handle_key_event(
 pub fn handle_command_mode(
     terminal: &mut TuiTerminal,
     shell: &mut ShellManager,
+    shell_input_buffer: &mut String,
     event: UserEvent,
 ) -> Result<bool> {
     match event {
@@ -78,7 +114,7 @@ pub fn handle_command_mode(
             matches!(e.kind, KeyEventKind::Press)
          && matches!(e.modifiers, KeyModifiers::CONTROL)
          && matches!(e.code, KeyCode::Char('b') | KeyCode::Char('B')) => {
-            handle_key_event(terminal, shell, e)?;
+            handle_key_event(terminal, shell, e, shell_input_buffer)?;
             Ok(true)
         }
         _ => Ok(false),

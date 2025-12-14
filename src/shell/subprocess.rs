@@ -13,6 +13,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::mpsc::{self, Receiver, UnboundedSender};
 use tracing::error;
 
+use crate::context::CommandLog;
 use crate::event::AppEvent;
 
 // Channel buffer sizes
@@ -25,6 +26,7 @@ pub struct ShellManager {
     event_sink: UnboundedSender<AppEvent>,
     pty_master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pty_writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    command_log: Arc<Mutex<CommandLog>>,
 }
 
 impl ShellManager {
@@ -82,11 +84,17 @@ impl ShellManager {
         let pty_master = Arc::new(Mutex::new(pair.master));
         let pty_writer = Arc::new(Mutex::new(pty_writer));
 
+        // Create command log with max 200 entries
+        let command_log = Arc::new(Mutex::new(CommandLog::new(200)));
+
         // Create channel for PTY output
         let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>(PTY_OUTPUT_BUFFER);
 
         // Clone event sink for reader thread
         let event_sink_clone = event_sink.clone();
+        
+        // Clone command log for reader thread
+        let command_log_clone = command_log.clone();
 
         // Spawn reader thread
         std::thread::spawn(move || {
@@ -106,6 +114,12 @@ impl ShellManager {
                     }
                     Ok(n) => {
                         let data = buf[..n].to_vec();
+                        
+                        // Append output to current command in log
+                        if let Ok(mut log) = command_log_clone.lock() {
+                            log.append_output(&data);
+                        }
+                        
                         // Use blocking_send since we're in a std::thread
                         if output_tx.blocking_send(data).is_err() {
                             // Receiver dropped, exit thread
@@ -133,9 +147,30 @@ impl ShellManager {
                 event_sink,
                 pty_master,
                 pty_writer,
+                command_log,
             },
             output_rx,
         ))
+    }
+
+    /// Start recording a new command in the log.
+    ///
+    /// This should be called when the user presses Enter to execute a command.
+    pub fn start_new_command(&mut self, command_line: String) {
+        if let Ok(mut log) = self.command_log.lock() {
+            log.start_new_command(command_line);
+        }
+    }
+
+    /// Get recent command records for context.
+    ///
+    /// Returns up to `limit` most recent commands with their outputs.
+    pub fn recent_command_records(&self, limit: usize) -> Vec<crate::context::CommandRecord> {
+        if let Ok(log) = self.command_log.lock() {
+            log.recent(limit).to_vec()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Handles user input by writing it to the PTY.
