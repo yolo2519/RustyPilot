@@ -66,6 +66,32 @@ pub struct SessionTab {
     pub name: String,
 }
 
+/// Result of clicking on the tab bar
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabClickResult {
+    /// Switch to a different session
+    SwitchToTab(SessionId),
+    /// Create a new session ("+" button clicked)
+    NewTab,
+    /// Close the specified session ("x" button on active tab)
+    CloseTab(SessionId),
+    /// No action (clicked on empty area)
+    None,
+}
+
+/// Result of clicking on the message area
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageAreaClickResult {
+    /// Next command button clicked (for pagination)
+    NextCommand(usize),
+    /// Execute command button clicked on a pending command card
+    ExecuteCommand(usize),
+    /// Cancel command button clicked on a pending command card
+    CancelCommand(usize),
+    /// No special action (normal area click)
+    None,
+}
+
 // ============================================================================
 // TuiAssistant Widget
 // ============================================================================
@@ -88,6 +114,9 @@ pub struct TuiAssistant {
     // Input state
     input_buffer: String,
     input_cursor: usize,
+
+    // Input selection state (byte offset of selection anchor, None = no selection)
+    input_selection_anchor: Option<usize>,
 
     // Scroll state (0 = at bottom, >0 = scrolled up by N lines)
     scroll_offset: usize,
@@ -115,6 +144,46 @@ pub struct TuiAssistant {
 
     // Cached visible width for visual mode
     cached_visible_width: Cell<usize>,
+
+    // Cached tab positions for mouse click detection [(start_x, end_x, tab_id, is_close_button)]
+    // Updated during render_tab_bar
+    cached_tab_positions: std::cell::RefCell<Vec<TabHitArea>>,
+
+    // Cached command card positions for mouse click detection
+    // Updated during render_message_list
+    cached_command_cards: std::cell::RefCell<Vec<CommandCardHitArea>>,
+}
+
+/// Hit area for a tab in the tab bar
+#[derive(Debug, Clone, Copy)]
+pub struct TabHitArea {
+    /// Start X position (screen coordinates)
+    pub start_x: u16,
+    /// End X position (exclusive)
+    pub end_x: u16,
+    /// Session ID (None for "+" button)
+    pub session_id: Option<SessionId>,
+    /// Whether this is the close button area
+    pub is_close_button: bool,
+}
+
+/// Hit area for a command card in the message area
+#[derive(Debug, Clone, Copy)]
+pub struct CommandCardHitArea {
+    /// Message index in the messages array
+    pub message_idx: usize,
+    /// Start Y position (screen coordinates, relative to message area)
+    pub start_y: u16,
+    /// End Y position (exclusive)
+    pub end_y: u16,
+    /// Button row Y position (relative to message area)
+    pub button_y: Option<u16>,
+    /// Next button area (start_x, end_x) - only present with pagination
+    pub next_btn: Option<(u16, u16)>,
+    /// Execute button area (start_x, end_x)
+    pub execute_btn: Option<(u16, u16)>,
+    /// Cancel button area (start_x, end_x)
+    pub cancel_btn: Option<(u16, u16)>,
 }
 
 impl TuiAssistant {
@@ -151,6 +220,7 @@ impl TuiAssistant {
             messages: Vec::new(),
             input_buffer: String::new(),
             input_cursor: 0,
+            input_selection_anchor: None,
             scroll_offset: 0,
             pending_command_idx: None,
             pending_commands: Vec::new(),
@@ -160,6 +230,8 @@ impl TuiAssistant {
             visual_state: None,
             cached_total_lines: Cell::new(0),
             cached_visible_width: Cell::new(80),
+            cached_tab_positions: std::cell::RefCell::new(Vec::new()),
+            cached_command_cards: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -567,6 +639,212 @@ impl TuiAssistant {
     }
 
     // ========================================================================
+    // Input Selection
+    // ========================================================================
+
+    /// Check if there's an active selection in the input box.
+    pub fn has_input_selection(&self) -> bool {
+        self.input_selection_anchor.is_some()
+    }
+
+    /// Start input selection at current cursor position.
+    pub fn start_input_selection(&mut self) {
+        if self.input_selection_anchor.is_none() {
+            self.input_selection_anchor = Some(self.input_cursor);
+        }
+    }
+
+    /// Clear input selection.
+    pub fn clear_input_selection(&mut self) {
+        self.input_selection_anchor = None;
+    }
+
+    /// Get input selection range as (start, end) byte offsets, where start <= end.
+    /// Returns None if no selection.
+    pub fn get_input_selection_range(&self) -> Option<(usize, usize)> {
+        self.input_selection_anchor.map(|anchor| {
+            let start = anchor.min(self.input_cursor);
+            let end = anchor.max(self.input_cursor);
+            (start, end)
+        })
+    }
+
+    /// Get selected text from input buffer.
+    pub fn get_input_selected_text(&self) -> Option<String> {
+        self.get_input_selection_range().map(|(start, end)| {
+            self.input_buffer[start..end].to_string()
+        })
+    }
+
+    /// Delete selected text and return it. Cursor moves to start of selection.
+    pub fn delete_input_selection(&mut self) -> Option<String> {
+        if let Some((start, end)) = self.get_input_selection_range() {
+            if start < end {
+                let deleted = self.input_buffer[start..end].to_string();
+                self.input_buffer.replace_range(start..end, "");
+                self.input_cursor = start;
+                self.input_selection_anchor = None;
+                return Some(deleted);
+            }
+        }
+        None
+    }
+
+    /// Copy selected text to clipboard without deleting.
+    pub fn copy_input_selection(&self) -> bool {
+        if let Some(text) = self.get_input_selected_text() {
+            if !text.is_empty() {
+                return copy_to_clipboard(&text);
+            }
+        }
+        false
+    }
+
+    /// Cut selected text (copy and delete).
+    pub fn cut_input_selection(&mut self) -> bool {
+        if self.copy_input_selection() {
+            self.delete_input_selection();
+            return true;
+        }
+        false
+    }
+
+    /// Move cursor with optional selection extension (for Shift+Arrow).
+    /// If `extend_selection` is true, starts or extends selection.
+    pub fn move_cursor_with_selection(&mut self, delta: i16, extend_selection: bool) {
+        if extend_selection {
+            self.start_input_selection();
+        } else {
+            self.clear_input_selection();
+        }
+        self.move_cursor(delta);
+    }
+
+    /// Select all text in input buffer.
+    pub fn select_all_input(&mut self) {
+        if !self.input_buffer.is_empty() {
+            self.input_selection_anchor = Some(0);
+            self.input_cursor = self.input_buffer.len();
+        }
+    }
+
+    /// Handle text input - if there's a selection, replace it with the new character.
+    pub fn insert_char_with_selection(&mut self, c: char) {
+        // Delete selection first if present
+        self.delete_input_selection();
+        // Then insert the character
+        self.insert_char(c);
+    }
+
+    /// Handle backspace - if there's a selection, delete it.
+    pub fn delete_char_with_selection(&mut self) {
+        if self.has_input_selection() {
+            self.delete_input_selection();
+        } else {
+            self.delete_char();
+        }
+    }
+
+    /// Handle delete key - if there's a selection, delete it.
+    pub fn delete_char_forward_with_selection(&mut self) {
+        if self.has_input_selection() {
+            self.delete_input_selection();
+        } else {
+            self.delete_char_forward();
+        }
+    }
+
+    /// Set input cursor position from mouse click, optionally extending selection.
+    pub fn set_input_cursor_from_click_with_selection(
+        &mut self,
+        rel_col: u16,
+        rel_row: u16,
+        extend_selection: bool,
+    ) {
+        if extend_selection {
+            self.start_input_selection();
+        } else {
+            self.clear_input_selection();
+        }
+        self.set_input_cursor_from_click(rel_col, rel_row);
+    }
+
+    /// Select the word at the current cursor position in the input buffer.
+    pub fn select_input_word_at_cursor(&mut self) {
+        if self.input_buffer.is_empty() {
+            return;
+        }
+
+        let is_word_char = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+
+        // Find byte index at cursor position
+        let mut byte_idx = 0;
+        for (i, c) in self.input_buffer.char_indices() {
+            if i >= self.input_cursor {
+                break;
+            }
+            byte_idx = i;
+            let _ = c; // Suppress unused warning
+        }
+
+        // If cursor is at the end, use the last byte position
+        if self.input_cursor >= self.input_buffer.len() && !self.input_buffer.is_empty() {
+            byte_idx = self.input_buffer.len();
+        }
+
+        let chars: Vec<(usize, char)> = self.input_buffer.char_indices().collect();
+        if chars.is_empty() {
+            return;
+        }
+
+        // Find the character index for the current byte position
+        let mut current_char_idx = 0;
+        for (idx, (bi, _)) in chars.iter().enumerate() {
+            if *bi >= byte_idx {
+                current_char_idx = idx;
+                break;
+            }
+            current_char_idx = idx;
+        }
+
+        // Get the character at cursor
+        let current_char = chars.get(current_char_idx).map(|(_, c)| *c).unwrap_or(' ');
+
+        // If on whitespace, no selection
+        if current_char.is_whitespace() {
+            return;
+        }
+
+        // Find word start
+        let mut start_idx = current_char_idx;
+        while start_idx > 0 {
+            let prev_char = chars.get(start_idx - 1).map(|(_, c)| *c).unwrap_or(' ');
+            if !is_word_char(prev_char) {
+                break;
+            }
+            start_idx -= 1;
+        }
+
+        // Find word end
+        let mut end_idx = current_char_idx;
+        while end_idx < chars.len().saturating_sub(1) {
+            let next_char = chars.get(end_idx + 1).map(|(_, c)| *c).unwrap_or(' ');
+            if !is_word_char(next_char) {
+                break;
+            }
+            end_idx += 1;
+        }
+
+        // Convert char indices back to byte indices
+        let start_byte = chars.get(start_idx).map(|(bi, _)| *bi).unwrap_or(0);
+        let end_byte = chars.get(end_idx).map(|(bi, c)| bi + c.len_utf8()).unwrap_or(self.input_buffer.len());
+
+        // Set selection
+        self.input_selection_anchor = Some(start_byte);
+        self.input_cursor = end_byte;
+    }
+
+    // ========================================================================
     // Scrolling
     // ========================================================================
 
@@ -730,6 +1008,154 @@ impl TuiAssistant {
     pub fn clear_visual_selection(&mut self) {
         if let Some(ref mut visual) = self.visual_state {
             visual.clear_selection();
+        }
+    }
+
+    /// Start visual selection at current cursor position.
+    ///
+    /// This enters Line selection mode and sets the anchor to the current cursor.
+    /// Used when starting mouse-based selection.
+    pub fn start_visual_selection(&mut self) {
+        if let Some(ref mut visual) = self.visual_state {
+            // If not already selecting, start selection
+            if !visual.is_selecting() {
+                visual.cycle_selection_mode(); // None -> Line
+            }
+        }
+    }
+
+    /// Set visual cursor position from screen-relative coordinates.
+    ///
+    /// This is used for mouse-based cursor positioning. The coordinates are
+    /// relative to the message area (excluding tab bar and input box).
+    ///
+    /// # Arguments
+    /// * `screen_row` - Row in the visible message area (0 = top of visible content)
+    /// * `screen_col` - Column in the visible area
+    pub fn set_visual_cursor_from_screen(&mut self, screen_row: usize, screen_col: usize) {
+        let Some(ref mut visual) = self.visual_state else {
+            return;
+        };
+
+        let cached_width = self.cached_visible_width.get();
+        if cached_width == 0 {
+            return;
+        }
+
+        let total_lines = self.cached_total_lines.get();
+        if total_lines == 0 {
+            return;
+        }
+
+        // Calculate visible range and convert screen row to content row
+        let max_scroll = self.max_scroll_offset.get();
+        let visible_height = total_lines.saturating_sub(max_scroll);
+        let visible_bottom = total_lines.saturating_sub(1).saturating_sub(self.scroll_offset);
+        let visible_top = visible_bottom.saturating_sub(visible_height.saturating_sub(1));
+
+        let content_row = (visible_top + screen_row).min(total_lines.saturating_sub(1));
+        let content_col = screen_col.min(cached_width.saturating_sub(1));
+
+        visual.set_cursor(content_row, content_col);
+    }
+
+    /// Select the word at the given screen position.
+    ///
+    /// This finds word boundaries and sets both anchor and cursor to select the word.
+    /// Note: This is a simplified implementation for the Assistant pane. Due to the
+    /// complex formatting (wrapped lines, message prefixes), it may not perfectly
+    /// match word boundaries in all cases.
+    ///
+    /// # Arguments
+    /// * `screen_row` - Row in the visible message area (0 = top of visible content)
+    /// * `screen_col` - Column in the visible area
+    pub fn select_word_at(&mut self, screen_row: usize, screen_col: usize) {
+        let cached_width = self.cached_visible_width.get();
+        if cached_width == 0 {
+            return;
+        }
+
+        // Build rendered lines to get content
+        let all_lines = self.build_rendered_lines(cached_width as u16);
+        let total_lines = all_lines.len();
+
+        if total_lines == 0 {
+            return;
+        }
+
+        // Calculate visible range and convert screen row to content row
+        let visible_bottom = total_lines.saturating_sub(1).saturating_sub(self.scroll_offset);
+        let max_visible = self.max_scroll_offset.get();
+        let visible_height = total_lines.saturating_sub(max_visible);
+        let visible_top = visible_bottom.saturating_sub(visible_height.saturating_sub(1));
+
+        let content_row = (visible_top + screen_row).min(total_lines.saturating_sub(1));
+
+        // Get the line content
+        let line = &all_lines[content_row];
+        let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let col = screen_col.min(line_text.chars().count().saturating_sub(1));
+
+        // Find word boundaries
+        let (word_start, word_end) = find_word_boundaries_in_string(&line_text, col);
+
+        // Set up visual state with selection
+        if let Some(ref mut visual) = self.visual_state {
+            // Set anchor at word start
+            visual.anchor = Some((content_row, word_start));
+            // Set cursor at word end
+            visual.set_cursor(content_row, word_end);
+            // Ensure we're in Line selection mode
+            if !visual.is_selecting() {
+                visual.cycle_selection_mode(); // None -> Line
+            }
+        }
+    }
+
+    /// Select the entire line at the given screen position (triple-click).
+    ///
+    /// This selects from column 0 to the end of the line's content.
+    ///
+    /// # Arguments
+    /// * `screen_row` - Row in the visible message area (0 = top of visible content)
+    pub fn select_line_at(&mut self, screen_row: usize) {
+        let cached_width = self.cached_visible_width.get();
+        if cached_width == 0 {
+            return;
+        }
+
+        // Build rendered lines to get content
+        let all_lines = self.build_rendered_lines(cached_width as u16);
+        let total_lines = all_lines.len();
+
+        if total_lines == 0 {
+            return;
+        }
+
+        // Calculate visible range and convert screen row to content row
+        let visible_bottom = total_lines.saturating_sub(1).saturating_sub(self.scroll_offset);
+        let max_visible = self.max_scroll_offset.get();
+        let visible_height = total_lines.saturating_sub(max_visible);
+        let visible_top = visible_bottom.saturating_sub(visible_height.saturating_sub(1));
+
+        let content_row = (visible_top + screen_row).min(total_lines.saturating_sub(1));
+
+        // Get the line content
+        let line = &all_lines[content_row];
+        let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let line_len = line_text.trim_end().chars().count();
+        let end_col = line_len.saturating_sub(1);
+
+        // Set up visual state with selection
+        if let Some(ref mut visual) = self.visual_state {
+            // Set anchor at line start
+            visual.anchor = Some((content_row, 0));
+            // Set cursor at line end
+            visual.set_cursor(content_row, end_col);
+            // Ensure we're in Line selection mode
+            if !visual.is_selecting() {
+                visual.cycle_selection_mode(); // None -> Line
+            }
         }
     }
 
@@ -1366,6 +1792,154 @@ impl TuiAssistant {
         (input_text_lines + 1).clamp(min_input_height, max_input_height)
     }
 
+    // ========================================================================
+    // Mouse Click Detection
+    // ========================================================================
+
+    /// Detect what was clicked in the tab bar.
+    ///
+    /// # Arguments
+    /// * `rel_col` - Column position relative to the assistant inner area
+    /// * `area_x` - X offset of the assistant inner area (for screen coordinate conversion)
+    ///
+    /// Returns a TabClickResult indicating what action to take.
+    pub fn get_tab_click_result(&self, screen_col: u16, area_x: u16) -> TabClickResult {
+        let tab_positions = self.cached_tab_positions.borrow();
+
+        // Convert screen column to absolute position for comparison
+        let abs_col = screen_col;
+
+        for hit in tab_positions.iter() {
+            let start = area_x + hit.start_x;
+            let end = area_x + hit.end_x;
+
+            if abs_col >= start && abs_col < end {
+                if hit.is_close_button {
+                    if let Some(id) = hit.session_id {
+                        return TabClickResult::CloseTab(id);
+                    }
+                } else if let Some(id) = hit.session_id {
+                    // Regular tab click - switch to it
+                    return TabClickResult::SwitchToTab(id);
+                } else {
+                    // "+" button
+                    return TabClickResult::NewTab;
+                }
+            }
+        }
+
+        TabClickResult::None
+    }
+
+    /// Detect what was clicked in the message area.
+    ///
+    /// # Arguments
+    /// * `screen_col` - Screen column position
+    /// * `screen_row` - Screen row position
+    /// * `area` - The message area rect (for coordinate conversion)
+    ///
+    /// Returns a MessageAreaClickResult indicating what action to take.
+    pub fn get_message_click_result(
+        &self,
+        screen_col: u16,
+        screen_row: u16,
+        area_x: u16,
+        area_y: u16,
+    ) -> MessageAreaClickResult {
+        let command_cards = self.cached_command_cards.borrow();
+
+        for card in command_cards.iter() {
+            // Check if click is on the button row
+            if let Some(button_y) = card.button_y {
+                let button_screen_y = area_y + button_y;
+
+                if screen_row == button_screen_y {
+                    // Check next button (pagination)
+                    if let Some((btn_start, btn_end)) = card.next_btn {
+                        let btn_start_x = area_x + btn_start;
+                        let btn_end_x = area_x + btn_end;
+                        if screen_col >= btn_start_x && screen_col < btn_end_x {
+                            return MessageAreaClickResult::NextCommand(card.message_idx);
+                        }
+                    }
+
+                    // Check execute button
+                    if let Some((btn_start, btn_end)) = card.execute_btn {
+                        let btn_start_x = area_x + btn_start;
+                        let btn_end_x = area_x + btn_end;
+                        if screen_col >= btn_start_x && screen_col < btn_end_x {
+                            return MessageAreaClickResult::ExecuteCommand(card.message_idx);
+                        }
+                    }
+
+                    // Check cancel button
+                    if let Some((btn_start, btn_end)) = card.cancel_btn {
+                        let btn_start_x = area_x + btn_start;
+                        let btn_end_x = area_x + btn_end;
+                        if screen_col >= btn_start_x && screen_col < btn_end_x {
+                            return MessageAreaClickResult::CancelCommand(card.message_idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        MessageAreaClickResult::None
+    }
+
+    /// Set the input cursor position based on screen click coordinates.
+    ///
+    /// # Arguments
+    /// * `rel_col` - Column relative to the input box inner area
+    /// * `rel_row` - Row relative to the input box inner area
+    pub fn set_input_cursor_from_click(&mut self, rel_col: u16, rel_row: u16) {
+        let input_area_width = self.last_input_area_width.get();
+        if input_area_width == 0 {
+            return;
+        }
+
+        let prompt_width = self.prompt_width();
+
+        // Track position through the input buffer
+        let mut current_x = prompt_width;
+        let mut current_y = 0u16;
+        let mut byte_pos = 0usize;
+        let mut best_pos = 0usize;
+
+        for ch in self.input_buffer.chars() {
+            // Check if we've reached or passed the target position
+            if current_y > rel_row || (current_y == rel_row && current_x >= rel_col) {
+                break;
+            }
+            best_pos = byte_pos + ch.len_utf8();
+
+            if ch == '\n' {
+                // Manual newline
+                current_y += 1;
+                current_x = 0;
+            } else {
+                let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+
+                if current_x + char_width > input_area_width {
+                    // Wrap to next line
+                    current_y += 1;
+                    current_x = char_width;
+                } else {
+                    current_x += char_width;
+                }
+            }
+
+            byte_pos += ch.len_utf8();
+        }
+
+        // If click is beyond the last character, position at end
+        if current_y < rel_row || (current_y == rel_row && current_x < rel_col) {
+            best_pos = self.input_buffer.len();
+        }
+
+        self.input_cursor = best_pos;
+    }
+
     /// Get cursor position for rendering.
     /// Returns Some((x, y)) if cursor should be shown, None otherwise.
     /// Coordinates are relative to the input box inner area.
@@ -1577,11 +2151,23 @@ fn render_tab_bar(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
     let tabs = &assistant.session_tabs;
     let num_tabs = tabs.len();
 
+    // Clear and prepare to track hit areas
+    let mut hit_areas: Vec<TabHitArea> = Vec::new();
+    let mut current_x: u16 = 0;
+
     if num_tabs == 0 {
         // Just show the "+" button
-        spans.push(Span::styled(" + ", Style::default().fg(Color::Green)));
+        let plus_text = " + ";
+        hit_areas.push(TabHitArea {
+            start_x: current_x,
+            end_x: current_x + plus_text.len() as u16,
+            session_id: None,
+            is_close_button: false,
+        });
+        spans.push(Span::styled(plus_text, Style::default().fg(Color::Green)));
         let line = Line::from(spans);
         Paragraph::new(line).render(area, buf);
+        *assistant.cached_tab_positions.borrow_mut() = hit_areas;
         return;
     }
 
@@ -1591,9 +2177,11 @@ fn render_tab_bar(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
         .position(|t| t.id == assistant.active_session)
         .unwrap_or(0);
 
-    // Calculate available width for tabs (excluding "+" button)
+    // Calculate available width for tabs (excluding "+" button, and account for close button on active)
     let total_width = area.width as usize;
-    let available_for_tabs = total_width.saturating_sub(TAB_PLUS_BUTTON_WIDTH);
+    // Active tab will have " x" suffix (2 chars), so account for that
+    let close_button_width = 2;
+    let available_for_tabs = total_width.saturating_sub(TAB_PLUS_BUTTON_WIDTH + close_button_width);
 
     // Determine display mode:
     // - Mode 0: All tabs with full names
@@ -1615,8 +2203,10 @@ fn render_tab_bar(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
 
     // Render left hidden indicator
     if hidden_left > 0 {
+        let indicator = format!("‹{} ", hidden_left);
+        current_x += indicator.width() as u16;
         spans.push(Span::styled(
-            format!("‹{} ", hidden_left),
+            indicator,
             Style::default().fg(Color::DarkGray),
         ));
     }
@@ -1635,6 +2225,7 @@ fn render_tab_bar(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
 
         if render_idx > 0 {
             spans.push(Span::raw(" "));
+            current_x += 1;
         }
 
         let is_active = tab.id == assistant.active_session;
@@ -1643,6 +2234,7 @@ fn render_tab_bar(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
         // Add Tab hint before the next session (subtle indicator)
         if is_next && !is_active {
             spans.push(Span::styled("⇥", Style::default().fg(Color::DarkGray)));
+            current_x += 1;
         }
 
         let style = if is_active {
@@ -1660,21 +2252,79 @@ fn render_tab_bar(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
         } else {
             get_short_tab_name(&tab.name, tab_idx)
         };
+
         let tab_text = format!(" {} ", display_name);
+        let tab_text_width = tab_text.width() as u16;
+
+        // Track hit area for the tab itself
+        let tab_start_x = current_x;
         spans.push(Span::styled(tab_text, style));
+        current_x += tab_text_width;
+
+        // For active tab, add close button "x"
+        if is_active {
+            let close_btn_start = current_x;
+            let close_style = Style::default()
+                .fg(Color::White)
+                .bg(Color::Rgb(180, 40, 40))
+                .add_modifier(Modifier::BOLD);
+            spans.push(Span::styled("×", close_style));
+            current_x += 1;
+
+            // Track tab area (excluding close button)
+            hit_areas.push(TabHitArea {
+                start_x: tab_start_x,
+                end_x: close_btn_start,
+                session_id: Some(tab.id),
+                is_close_button: false,
+            });
+
+            // Track close button area
+            hit_areas.push(TabHitArea {
+                start_x: close_btn_start,
+                end_x: current_x,
+                session_id: Some(tab.id),
+                is_close_button: true,
+            });
+        } else {
+            // Non-active tab - just the tab area
+            hit_areas.push(TabHitArea {
+                start_x: tab_start_x,
+                end_x: current_x,
+                session_id: Some(tab.id),
+                is_close_button: false,
+            });
+        }
     }
 
     // Render right hidden indicator
     if hidden_right > 0 {
+        let indicator = format!(" {}›", hidden_right);
+        current_x += indicator.width() as u16;
         spans.push(Span::styled(
-            format!(" {}›", hidden_right),
+            indicator,
             Style::default().fg(Color::DarkGray),
         ));
     }
 
     // Add "+" button for new session (Ctrl+B,T in command mode)
     spans.push(Span::raw(" "));
-    spans.push(Span::styled(" + ", Style::default().fg(Color::Green)));
+    current_x += 1;
+
+    let plus_start = current_x;
+    let plus_text = " + ";
+    spans.push(Span::styled(plus_text, Style::default().fg(Color::Green)));
+    current_x += plus_text.len() as u16;
+
+    hit_areas.push(TabHitArea {
+        start_x: plus_start,
+        end_x: current_x,
+        session_id: None,
+        is_close_button: false,
+    });
+
+    // Store hit areas for click detection
+    *assistant.cached_tab_positions.borrow_mut() = hit_areas;
 
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
@@ -1749,10 +2399,12 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
         return;
     }
 
-    // Build all lines from messages
+    // Build all lines from messages and track command card positions
     let mut all_lines: Vec<Line> = Vec::new();
+    // Track: (message_idx, start_line_idx, card_height, is_pending, has_pagination)
+    let mut card_line_ranges: Vec<(usize, usize, usize, bool, bool)> = Vec::new();
 
-    for msg in &assistant.messages {
+    for (msg_idx, msg) in assistant.messages.iter().enumerate() {
         match msg {
             ChatMessage::User { text } => {
                 // Manually wrap user message text
@@ -1816,15 +2468,22 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
                 } else {
                     None
                 };
-                all_lines.extend(render_command_card(
+                let start_line = all_lines.len();
+                let is_pending = *status == CommandStatus::Pending;
+                let card_lines = render_command_card(
                     command,
                     explanation,
                     *status,
                     verdict,
                     area.width,
                     pagination
-                ));
+                );
+                let card_height = card_lines.len();
+                all_lines.extend(card_lines);
                 all_lines.push(Line::raw("")); // Empty line after card
+
+                // Track this card's position (include pagination info for button hit area calculation)
+                card_line_ranges.push((msg_idx, start_line, card_height, is_pending, pagination.is_some()));
             }
             ChatMessage::Error { text } => {
                 // Render error message with distinct styling
@@ -1958,6 +2617,89 @@ fn render_message_list(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
             }
         }
     }
+
+    // Calculate command card hit areas for mouse click detection
+    // Convert content line indices to screen coordinates
+    let mut command_card_hits: Vec<CommandCardHitArea> = Vec::new();
+
+    for (msg_idx, start_line, card_height, is_pending, has_pagination) in card_line_ranges {
+        // Check if any part of this card is visible
+        let card_end_line = start_line + card_height;
+
+        // Skip lines before visible area
+        if card_end_line <= skip {
+            continue;
+        }
+        // Skip lines after visible area
+        if start_line >= skip + visible_lines {
+            continue;
+        }
+
+        // Calculate screen Y coordinates (relative to area)
+        let screen_start_y = if start_line >= skip {
+            (start_line - skip) as u16
+        } else {
+            0
+        };
+        let screen_end_y = ((card_end_line - skip).min(visible_lines)) as u16;
+
+        // Only track button positions for pending cards
+        let (button_y, next_btn, execute_btn, cancel_btn) = if is_pending {
+            // Card layout (with verdict line):
+            // Line 0: Top border
+            // Line 1: Verdict line
+            // Line 2: Explanation line (optional)
+            // Line 3/2: Command line
+            // Line 4/3: Status/action line with buttons
+            // Line 5/4: Bottom border
+            //
+            // Button line is always the second-to-last line (card_height - 2)
+            let button_line_offset = card_height.saturating_sub(2);
+            let button_screen_y = screen_start_y + button_line_offset as u16;
+
+            if button_screen_y < screen_end_y {
+                // Button positions based on actual rendered spans:
+                // " │" = 2 chars
+                //
+                // With pagination:
+                //   " [Ctrl+A] Next " (15 chars at 2-16)
+                //   " " (1 char)
+                //   " [Ctrl+Y] Execute " (18 chars at 18-35)
+                //   " " (1 char)
+                //   " [Ctrl+N] Cancel " (17 chars at 37-53)
+                //
+                // Without pagination:
+                //   " [Ctrl+Y] Execute " (18 chars at 2-19)
+                //   " " (1 char)
+                //   " [Ctrl+N] Cancel " (17 chars at 21-37)
+                let (next_btn, exec_start, exec_end, cancel_start, cancel_end) = if has_pagination {
+                    // Next button at 2-16, Execute after Next, Cancel after Execute
+                    (Some((2u16, 17u16)), 18u16, 36u16, 37u16, 54u16)
+                } else {
+                    // No Next button, Execute starts right after border
+                    (None, 2u16, 20u16, 21u16, 38u16)
+                };
+
+                (Some(button_screen_y), next_btn, Some((exec_start, exec_end)), Some((cancel_start, cancel_end)))
+            } else {
+                (None, None, None, None)
+            }
+        } else {
+            (None, None, None, None)
+        };
+
+        command_card_hits.push(CommandCardHitArea {
+            message_idx: msg_idx,
+            start_y: screen_start_y,
+            end_y: screen_end_y,
+            button_y,
+            next_btn,
+            execute_btn,
+            cancel_btn,
+        });
+    }
+
+    *assistant.cached_command_cards.borrow_mut() = command_card_hits;
 }
 
 /// Render a command suggestion card
@@ -1970,8 +2712,6 @@ fn render_command_card(
     width: u16,
     pagination: Option<(usize, usize)>,
 ) -> Vec<Line<'static>> {
-    // TODO: the explanation could contains more than one single line,
-    //       but now it only renders one line.
     let mut lines = Vec::new();
 
     // Determine verdict label and style based on verdict
@@ -2031,7 +2771,7 @@ fn render_command_card(
         Span::styled("│", Style::default().fg(border_color)),
     ]));
 
-    // Explanation line (if not empty)
+    // Explanation lines (supports multi-line wrapping)
     if !explanation.is_empty() {
         let exp_line = format_card_line(explanation, card_width);
         lines.push(Line::from(vec![
@@ -2041,48 +2781,69 @@ fn render_command_card(
         ]));
     }
 
-    // Command line with $ prefix
+    // Command line with > prefix
     let cmd_display = format!("> {}", command);
     let cmd_line = format_card_line(&cmd_display, card_width);
     lines.push(Line::from(vec![
-        Span::styled(" │", Style::default().fg(border_color)),
+        Span::styled(" │", border_style),
         Span::styled(cmd_line, Style::default().fg(Color::White).bold()),
-        Span::styled("│", Style::default().fg(border_color)),
+        Span::styled("│", border_style),
     ]));
 
     // Status/action line based on verdict and status
-    let action_text = match (verdict.is_deny(), status) {
-        (true, CommandStatus::Pending) => {
-            if pagination.is_some() {
-                "[Ctrl+A] Next  [Ctrl+Y] Copy  [Ctrl+N] Cancel"
-            } else {
-                "[Ctrl+Y] Copy  [Ctrl+N] Cancel"
-            }
-        }
-        (true, CommandStatus::Executed) => "Copied",
-        (true, CommandStatus::Rejected) => "Rejected",
-        (_, CommandStatus::Executed) => "Executed",
-        (_, CommandStatus::Rejected) => "Rejected",
-        (_, CommandStatus::Pending) => {
-            if pagination.is_some() {
-                "[Ctrl+A] Next  [Ctrl+Y] Execute  [Ctrl+N] Cancel"
-            } else {
-                "[Ctrl+Y] Execute  [Ctrl+N] Cancel"
-            }
-        }
-    };
+    match status {
+        CommandStatus::Pending => {
+            // Button styles with distinct backgrounds
+            let next_btn_style = Style::default().fg(Color::White).bg(Color::Blue).bold();
+            let exec_btn_style = Style::default().fg(Color::White).bg(Color::Rgb(0, 100, 0)).bold();
+            let cancel_btn_style = Style::default().fg(Color::White).bg(Color::Rgb(139, 0, 0)).bold();
 
-    let status_line = format_card_line(action_text, card_width);
-    let status_style = match status {
-        CommandStatus::Pending => Style::default().fg(border_color),
-        CommandStatus::Executed => Style::default().fg(Color::Cyan),
-        CommandStatus::Rejected => Style::default().fg(Color::Red).dim(),
-    };
-    lines.push(Line::from(vec![
-        Span::styled(" │", Style::default().fg(border_color)),
-        Span::styled(status_line, status_style),
-        Span::styled("│", Style::default().fg(border_color)),
-    ]));
+            // Determine button labels based on verdict
+            let exec_label = if verdict.is_deny() { " [Ctrl+Y] Copy " } else { " [Ctrl+Y] Execute " };
+
+            let mut spans = vec![Span::styled(" │", border_style)];
+
+            // Add Next button if pagination exists
+            if pagination.is_some() {
+                spans.push(Span::styled(" [Ctrl+A] Next ", next_btn_style));
+                spans.push(Span::raw(" "));
+            }
+
+            // Execute/Copy button
+            spans.push(Span::styled(exec_label, exec_btn_style));
+            spans.push(Span::raw(" "));
+
+            // Cancel button
+            spans.push(Span::styled(" [Ctrl+N] Cancel ", cancel_btn_style));
+
+            // Calculate padding to fill card width
+            let btn_content_width: usize = spans.iter().skip(1).map(|s| s.content.chars().count()).sum();
+            let padding_needed = card_width.saturating_sub(btn_content_width);
+            if padding_needed > 0 {
+                spans.push(Span::styled(" ".repeat(padding_needed), border_style));
+            }
+
+            spans.push(Span::styled("│", border_style));
+            lines.push(Line::from(spans));
+        }
+        CommandStatus::Executed => {
+            let status_text = if verdict.is_deny() { "✓ Copied" } else { "✓ Executed" };
+            let status_line = format_card_line(status_text, card_width);
+            lines.push(Line::from(vec![
+                Span::styled(" │", border_style),
+                Span::styled(status_line, Style::default().fg(Color::Cyan)),
+                Span::styled("│", border_style),
+            ]));
+        }
+        CommandStatus::Rejected => {
+            let status_line = format_card_line("✗ Rejected", card_width);
+            lines.push(Line::from(vec![
+                Span::styled(" │", border_style),
+                Span::styled(status_line, Style::default().fg(Color::Red).dim()),
+                Span::styled("│", border_style),
+            ]));
+        }
+    }
 
     // Bottom border
     let bottom_border = format!(" └{}┘", "─".repeat(card_width));
@@ -2104,7 +2865,7 @@ fn format_card_line(text: &str, width: usize) -> String {
     }
 }
 
-/// Render the input box at the bottom with multi-line support
+/// Render the input box at the bottom with multi-line support and selection highlighting
 fn render_input_box(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
     let block = Block::default()
         .borders(Borders::TOP)
@@ -2120,25 +2881,45 @@ fn render_input_box(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
     // Cache the input area width for cursor movement calculations
     assistant.last_input_area_width.set(inner.width);
 
-    // Render input prompt and text
+    // Get selection range (if any)
+    let selection_range = assistant.get_input_selection_range();
+
+    // Render input prompt and text directly to buffer for selection support
     let prompt = assistant.prompt();
     let prompt_width = assistant.prompt_width();
     let input_text = assistant.get_input();
 
-    // Build lines with wrapping (no auto-formatting, just hard wrap at width)
-    let mut lines: Vec<Line> = Vec::new();
-    let mut current_line_spans: Vec<Span> = Vec::new();
+    let prompt_style = Style::default().fg(Color::Cyan);
+    let normal_style = Style::default();
+    let selection_style = Style::default().fg(Color::White).bg(Color::Blue);
 
-    // Add prompt at the beginning
-    current_line_spans.push(Span::styled(prompt, Style::default().fg(Color::Cyan)));
+    // Render prompt
+    let mut x = inner.x;
+    let mut y = inner.y;
+    for ch in prompt.chars() {
+        if x >= inner.x + inner.width {
+            break;
+        }
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_char(ch).set_style(prompt_style);
+        }
+        x += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+    }
+
+    // Track byte position for selection checking
+    let mut byte_pos: usize = 0;
     let mut current_x = prompt_width;
 
     // Process each character
     for ch in input_text.chars() {
+        let char_len = ch.len_utf8();
+
         if ch == '\n' {
-            // Manual newline: finish current line and start a new one
-            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+            // Manual newline: move to next line
+            y += 1;
             current_x = 0;
+            x = inner.x;
+            byte_pos += char_len;
             continue;
         }
 
@@ -2146,28 +2927,74 @@ fn render_input_box(assistant: &TuiAssistant, area: Rect, buf: &mut Buffer) {
 
         // Check if we need to wrap
         if current_x + char_width > inner.width {
-            // Finish current line and start a new one
-            lines.push(Line::from(std::mem::take(&mut current_line_spans)));
+            // Wrap to next line
+            y += 1;
             current_x = 0;
+            x = inner.x;
         }
 
-        // Add character
-        // Note: We don't render cursor here anymore - it will be a real cursor
-        current_line_spans.push(Span::raw(ch.to_string()));
+        // Check if we're still within the visible area
+        if y >= inner.y + inner.height {
+            break;
+        }
+
+        // Determine style based on selection
+        let is_selected = selection_range.map_or(false, |(start, end)| {
+            byte_pos >= start && byte_pos < end
+        });
+        let style = if is_selected { selection_style } else { normal_style };
+
+        // Render character
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_char(ch).set_style(style);
+        }
+
+        x += char_width;
         current_x += char_width;
+        byte_pos += char_len;
+    }
+}
+
+/// Find word boundaries at the given character position in a string.
+/// Returns (start_col, end_col) of the word.
+fn find_word_boundaries_in_string(text: &str, col: usize) -> (usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+
+    if len == 0 || col >= len {
+        return (col, col);
     }
 
-    // Add remaining spans to the last line
-    if !current_line_spans.is_empty() {
-        lines.push(Line::from(current_line_spans));
+    let is_word_char = |c: char| -> bool {
+        c.is_alphanumeric() || c == '_' || c == '-'
+    };
+
+    let current_char = chars[col];
+
+    // If clicking on whitespace, just select that cell
+    if current_char.is_whitespace() {
+        return (col, col);
     }
 
-    // Ensure at least one line exists
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(prompt, Style::default().fg(Color::Cyan))));
+    // Find word start
+    let mut start = col;
+    while start > 0 {
+        let prev_char = chars[start - 1];
+        if !is_word_char(prev_char) {
+            break;
+        }
+        start -= 1;
     }
 
-    // Render the lines
-    let paragraph = Paragraph::new(lines);
-    paragraph.render(inner, buf);
+    // Find word end
+    let mut end = col;
+    while end < len.saturating_sub(1) {
+        let next_char = chars[end + 1];
+        if !is_word_char(next_char) {
+            break;
+        }
+        end += 1;
+    }
+
+    (start, end)
 }
