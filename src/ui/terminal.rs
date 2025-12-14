@@ -140,25 +140,49 @@ impl TuiTerminal {
     /// Receives and processes PTY output.
     /// Call this in tokio::select! to handle async PTY data.
     pub async fn recv_pty_output(&mut self) {
-        if let Some(bytes) = self.pty_output.recv().await {
+        let Some(first) = self.pty_output.recv().await else {
+            return;
+        };
+
+        // Drain bursts so heavy output doesn't force a redraw per chunk.
+        // We always process all drained bytes for terminal display, but we coalesce the
+        // AppEvent::ShellOutput snippet into a single message to reduce event traffic.
+        let mut snippet_acc = String::new();
+
+        let process_one = |this: &mut Self, bytes: Vec<u8>, snippet_acc: &mut String| {
             // Always process PTY output for terminal display (including newlines, etc.)
-            self.process(&bytes);
+            this.process(&bytes);
 
             // TODO: the raw pty output is sometimes just GIBBERISH for AI.
             // TODO: Use rendered output instead.
             // TODO: do shell integration to see the boundary of commands (OSC)
-            // Emit a small text snippet for context building (skip pure whitespace)
+            // Collect a small text snippet for context building (skip pure whitespace)
             let snippet = String::from_utf8_lossy(&bytes);
             let trimmed = snippet.trim();
-            if !trimmed.is_empty() {
-                // Limit to avoid flooding the event channel
-                let truncated: String = trimmed.chars().take(400).collect();
-                if let Err(e) = self
-                    .event_sink
-                    .send(AppEvent::ShellOutput { data: truncated })
-                {
-                    error!("Failed to send shell output event: {:?}", e);
+            if !trimmed.is_empty() && snippet_acc.len() < 2048 {
+                if !snippet_acc.is_empty() {
+                    snippet_acc.push('\n');
                 }
+                snippet_acc.push_str(trimmed);
+            }
+        };
+
+        process_one(self, first, &mut snippet_acc);
+
+        // Drain any immediately-available chunks.
+        // Bound the drain so we don't starve other parts of the event loop.
+        for _ in 0..64 {
+            match self.pty_output.try_recv() {
+                Ok(bytes) => process_one(self, bytes, &mut snippet_acc),
+                Err(_) => break,
+            }
+        }
+
+        if !snippet_acc.trim().is_empty() {
+            // Limit to avoid flooding the event channel
+            let truncated: String = snippet_acc.chars().take(400).collect();
+            if let Err(e) = self.event_sink.send(AppEvent::ShellOutput { data: truncated }) {
+                error!("Failed to send shell output event: {:?}", e);
             }
         }
     }
@@ -942,8 +966,8 @@ impl TuiTerminal {
                     current_text.push(c);
                 } else {
                     if !current_text.is_empty() {
-                        spans.push(Span::styled(current_text.clone(), current_style));
-                        current_text.clear();
+                        let text = std::mem::take(&mut current_text);
+                        spans.push(Span::styled(text, current_style));
                     }
                     current_style = style;
                     current_text.push(c);
