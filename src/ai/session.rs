@@ -25,6 +25,7 @@ use tracing::error;
 
 use crate::context::ContextSnapshot;
 use crate::event::{AiStreamData, AiUiUpdate, AppEvent};
+use crate::utils::shell2::collect_shell2_system_context;
 
 use super::prompt;
 
@@ -686,23 +687,8 @@ impl AiSessionManager {
         Self::trim_history(session);
 
         // Build OpenAI request with tools
-        let request = match CreateChatCompletionRequestArgs::default()
-            .model(&self.model)
-            .messages(session.conversation_history.clone())
-            .tools(vec![create_suggest_command_tool()])
-            .build()
-        {
-            Ok(req) => req,
-            Err(e) => {
-                if let Err(e) = self.ai_stream_tx.try_send(AiStreamData::Error {
-                    session_id,
-                    error: format!("Failed to build request: {}", e),
-                }) {
-                    error!("Failed to send error event: {:?}", e);
-                }
-                return;
-            }
-        };
+        let base_messages = session.conversation_history.clone();
+        let model = self.model.clone();
 
         // Log the request JSON
         if let Ok(request_json) = serde_json::to_string_pretty(&request) {
@@ -712,9 +698,49 @@ impl AiSessionManager {
         // Clone what we need for the async task
         let stream_tx = self.ai_stream_tx.clone();
         let client = self.client.clone();
+        let tool = create_suggest_command_tool();
 
         // Spawn async task to handle streaming
         tokio::spawn(async move {
+            // Shell2: collect extra system context (best-effort) before the network call.
+            let shell2_ctx = collect_shell2_system_context(&context).await;
+
+            // Build the OpenAI request messages:
+            // - include the persisted conversation history
+            // - inject Shell2 context as an additional system message (request-only)
+            let mut messages = base_messages;
+            if !shell2_ctx.is_empty() {
+                if let Ok(sys_msg) = ChatCompletionRequestSystemMessageArgs::default()
+                    .content(format!("Shell2 system context (read-only):\n{}", shell2_ctx))
+                    .build()
+                {
+                    // Insert right after the primary system prompt when possible.
+                    let idx = if messages.is_empty() { 0 } else { 1.min(messages.len()) };
+                    messages.insert(idx, sys_msg.into());
+                }
+            }
+
+            let request = match CreateChatCompletionRequestArgs::default()
+                .model(&model)
+                .messages(messages)
+                .tools(vec![tool])
+                .build()
+            {
+                Ok(req) => req,
+                Err(e) => {
+                    if let Err(e) = stream_tx
+                        .send(AiStreamData::Error {
+                            session_id,
+                            error: format!("Failed to build request: {}", e),
+                        })
+                        .await
+                    {
+                        error!("Failed to send error event: {:?}", e);
+                    }
+                    return;
+                }
+            };
+
             match client.chat().create_stream(request).await {
                 Ok(mut stream) => {
                     // Accumulate tool calls during streaming
