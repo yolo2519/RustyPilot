@@ -60,6 +60,14 @@ pub struct App {
     command_mode: bool,  // Is the app in the command mode?
     force_redraw_flag: bool,  // Should force a full screen clear and redraw?
 
+    // Mouse drag state for visual selection
+    mouse_drag_state: Option<mouse_event::MouseDragState>,
+
+    // Separator drag state for pane resizing
+    separator_drag_state: Option<mouse_event::SeparatorDragState>,
+
+    // Multi-click detection state (double/triple-click)
+    last_click: Option<mouse_event::LastClickState>,
     // Shell input tracking
     shell_input_buffer: String,  // Track user input in shell panel
 
@@ -107,6 +115,9 @@ impl App {
             exit: false,
             command_mode: false,
             force_redraw_flag: false,
+            mouse_drag_state: None,
+            separator_drag_state: None,
+            last_click: None,
             shell_input_buffer: String::new(),
             layout_builder,
             layout: initial_layout,
