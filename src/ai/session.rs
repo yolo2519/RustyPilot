@@ -764,10 +764,7 @@ impl AiSessionManager {
         let force_shell2_refresh = should_force_shell2_refresh(user_input);
         let shell2_intent = shell2_intent_from_user_input(user_input);
 
-        // Log the request JSON
-        if let Ok(request_json) = serde_json::to_string_pretty(&request) {
-            tracing::info!("Sending request to OpenAI API (session {}): {}", session_id, request_json);
-        }
+
 
         // Clone what we need for the async task
         let stream_tx = self.ai_stream_tx.clone();
@@ -847,6 +844,11 @@ impl AiSessionManager {
                     return;
                 }
             };
+
+            // Log the request JSON
+            if let Ok(request_json) = serde_json::to_string_pretty(&request) {
+                tracing::info!("Sending request to OpenAI API (session {}): {}", session_id, request_json);
+            }
 
             match client.chat().create_stream(request).await {
                 Ok(mut stream) => {
