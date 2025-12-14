@@ -6,7 +6,7 @@
 
 
 use crate::event::{AppEvent, init_app_eventsource, init_user_event};
-use crate::event::{assistant as assistant_event, terminal as terminal_event, UserEvent};
+use crate::event::{assistant as assistant_event, mouse as mouse_event, terminal as terminal_event, UserEvent};
 use crate::ai::session::AiSessionManager;
 use crate::context::ContextManager;
 use crate::shell::ShellManager;
@@ -28,6 +28,19 @@ pub enum ActivePane {
     Assistant,
 }
 
+/// Target for mouse events - which UI element is under the mouse
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseTarget {
+    /// Mouse is over the terminal pane
+    Terminal,
+    /// Mouse is over the assistant pane
+    Assistant,
+    /// Mouse is over the separator between panes
+    Separator,
+    /// Mouse is outside any tracked area
+    Outside,
+}
+
 pub struct App {
     // backend
     shell_manager: ShellManager,
@@ -47,6 +60,14 @@ pub struct App {
     command_mode: bool,  // Is the app in the command mode?
     force_redraw_flag: bool,  // Should force a full screen clear and redraw?
 
+    // Mouse drag state for visual selection
+    mouse_drag_state: Option<mouse_event::MouseDragState>,
+
+    // Separator drag state for pane resizing
+    separator_drag_state: Option<mouse_event::SeparatorDragState>,
+
+    // Multi-click detection state (double/triple-click)
+    last_click: Option<mouse_event::LastClickState>,
     // Shell input tracking
     shell_input_buffer: String,  // Track user input in shell panel
 
@@ -94,6 +115,9 @@ impl App {
             exit: false,
             command_mode: false,
             force_redraw_flag: false,
+            mouse_drag_state: None,
+            separator_drag_state: None,
+            last_click: None,
             shell_input_buffer: String::new(),
             layout_builder,
             layout: initial_layout,
@@ -394,6 +418,31 @@ impl App {
 impl App {
 
     fn handle_user_event(&mut self, event: UserEvent) -> Result<()>  {
+        // Handle mouse events first (they work in all modes)
+        if let UserEvent::Mouse(mouse) = event {
+            let current_ratio = self.split_ratio();
+            let result = mouse_event::handle_mouse_event(
+                mouse,
+                &self.layout,
+                &mut self.tui_terminal,
+                &mut self.tui_assistant,
+                &mut self.shell_manager,
+                &mut self.ai_sessions,
+                &mut self.active_pane,
+                &mut self.mouse_drag_state,
+                &mut self.separator_drag_state,
+                &mut self.last_click,
+                current_ratio,
+            )?;
+
+            // Apply any deferred actions from mouse event
+            if let Some(new_ratio) = result.new_split_ratio {
+                self.set_split_ratio(new_ratio);
+            }
+
+            return Ok(());
+        }
+
         if self.command_mode {
             self.handle_command_mode_events(event)?;
             return Ok(());
