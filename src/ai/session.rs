@@ -27,7 +27,7 @@ use tracing::error;
 
 use crate::context::ContextSnapshot;
 use crate::event::{AiStreamData, AiUiUpdate, AppEvent};
-use crate::utils::shell2::collect_shell2_system_context;
+use crate::utils::shell2::{collect_shell2_system_context_with_intent, Shell2Intent};
 
 use super::prompt;
 
@@ -45,6 +45,8 @@ struct Shell2Cache {
 struct Shell2CacheEntry {
     at: Instant,
     cwd: String,
+    want_git: bool,
+    want_fs: bool,
     text: String,
 }
 
@@ -71,6 +73,33 @@ fn should_force_shell2_refresh(user_input: &str) -> bool {
     ]
     .iter()
     .any(|k| s.contains(k))
+}
+
+fn shell2_intent_from_user_input(user_input: &str) -> Shell2Intent {
+    let s = user_input.to_ascii_lowercase();
+
+    let want_git = ["git", "branch", "status", "diff", "commit", "rebase", "merge"]
+        .iter()
+        .any(|k| s.contains(k));
+
+    let want_fs = [
+        "file",
+        "files",
+        "folder",
+        "directory",
+        "repo",
+        "repository",
+        "list",
+        "ls",
+        "where am i",
+        "pwd",
+        "what's in",
+        "whats in",
+    ]
+    .iter()
+    .any(|k| s.contains(k));
+
+    Shell2Intent { want_git, want_fs }
 }
 
 // =============================================================================
@@ -733,6 +762,7 @@ impl AiSessionManager {
         let model = self.model.clone();
         let shell2_cache = self.shell2_cache.clone();
         let force_shell2_refresh = should_force_shell2_refresh(user_input);
+        let shell2_intent = shell2_intent_from_user_input(user_input);
 
         // Log the request JSON
         if let Ok(request_json) = serde_json::to_string_pretty(&request) {
@@ -756,7 +786,10 @@ impl AiSessionManager {
                 cache.last.as_ref().and_then(|e| {
                     let is_fresh = now.duration_since(e.at) < SHELL2_TTL;
                     let same_cwd = e.cwd == cwd;
-                    if is_fresh && same_cwd && !force_shell2_refresh {
+                    let covers_intent =
+                        (!shell2_intent.want_git || e.want_git) && (!shell2_intent.want_fs || e.want_fs);
+
+                    if is_fresh && same_cwd && covers_intent && !force_shell2_refresh {
                         Some(e.text.clone())
                     } else {
                         None
@@ -767,11 +800,13 @@ impl AiSessionManager {
             let shell2_ctx = if let Some(text) = cached {
                 text
             } else {
-                let text = collect_shell2_system_context(&context).await;
+                let text = collect_shell2_system_context_with_intent(&context, shell2_intent).await;
                 let mut cache = shell2_cache.lock().await;
                 cache.last = Some(Shell2CacheEntry {
                     at: now,
                     cwd,
+                    want_git: shell2_intent.want_git,
+                    want_fs: shell2_intent.want_fs,
                     text: text.clone(),
                 });
                 text
