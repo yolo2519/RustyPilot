@@ -19,6 +19,7 @@ use crate::security::{evaluate, ExecutionDecision, gate_command};
 use anyhow::{Context, Result};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
+use tokio::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
@@ -59,6 +60,8 @@ pub struct App {
     exit: bool,  // Should the app exit?
     command_mode: bool,  // Is the app in the command mode?
     force_redraw_flag: bool,  // Should force a full screen clear and redraw?
+    needs_draw: bool,
+    next_frame_deadline: Instant,
 
     // Mouse drag state for visual selection
     mouse_drag_state: Option<mouse_event::MouseDragState>,
@@ -119,6 +122,8 @@ impl App {
             separator_drag_state: None,
             last_click: None,
             shell_input_buffer: String::new(),
+            needs_draw: false,
+            next_frame_deadline: Instant::now(),
             layout_builder,
             layout: initial_layout,
             user_events: init_user_event(),
@@ -282,7 +287,20 @@ impl App {
 
 
 
+    fn request_draw(&mut self, asap: bool) {
+        self.needs_draw = true;
+
+        // Cap redraw rate for performance.
+        // Terminal rendering is relatively expensive, and we can easily receive bursts
+        // of PTY output / AI stream chunks.
+        const FRAME: Duration = Duration::from_millis(16);
+        let now = Instant::now();
+        self.next_frame_deadline = if asap { now } else { now + FRAME };
+    }
+
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        // Ensure we draw at least once when entering the loop.
+        self.request_draw(true);
         loop {
             if self.exit {
                 break Ok(());
@@ -291,28 +309,35 @@ impl App {
                 res = self.user_events.recv() => {
                     let usr_evt = res.with_context(|| anyhow::anyhow!("User event stream is ended."))?;
                     self.handle_user_event(usr_evt?)?;
+                    self.request_draw(false);
                 }
                 res = self.app_events.recv() => {
                     let app_evt = res.with_context(|| anyhow::anyhow!("App event stream is ended"))?;
                     self.handle_app_event(app_evt)?;
+                    self.request_draw(false);
                 }
                 // AiSessionManager receives stream data, stores it, and returns UI updates
                 update = self.ai_sessions.recv_ai_stream() => {
                     if let Some(update) = update {
                         // Forward UI update to TuiAssistant for display
                         self.tui_assistant.handle_ai_update(update);
+                        self.request_draw(false);
                     }
                 }
                 _ = self.tui_terminal.recv_pty_output() => {
                     // PTY output is handled internally by TuiTerminal
+                    self.request_draw(false);
                 }
-            }
-            // Check if force redraw is needed (e.g., after stderr pollution)
-            if self.force_redraw_flag {
-                self.force_redraw_flag = false;
-                self.force_redraw(terminal)?;
-            } else {
-                self.draw(terminal)?;
+                _ = tokio::time::sleep_until(self.next_frame_deadline), if self.needs_draw => {
+                    // Check if force redraw is needed (e.g., after stderr pollution)
+                    if self.force_redraw_flag {
+                        self.force_redraw_flag = false;
+                        self.force_redraw(terminal)?;
+                    } else {
+                        self.draw(terminal)?;
+                    }
+                    self.needs_draw = false;
+                }
             }
         }
     }
