@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use tokio::process::Command;
 use tokio::time::timeout;
+use std::process::Stdio;
 
 use crate::context::ContextSnapshot;
 
@@ -33,7 +34,8 @@ impl Default for Shell2Config {
 }
 
 fn default_shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+    // Prefer the user's configured shell, but keep a safe fallback.
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
 fn truncate_lines(s: &str, max_lines: usize) -> String {
@@ -75,9 +77,11 @@ pub struct Shell2Intent {
 async fn run_shell_script(cfg: &Shell2Config, cwd: &str, script: &str) -> Option<String> {
     let shell = default_shell();
     let mut c = Command::new(shell);
-    c.arg("-lc").arg(script);
+    // Use non-login shell to avoid slow profile scripts and reduce variability.
+    c.arg("-c").arg(script);
     c.current_dir(cwd);
     c.kill_on_drop(true);
+    c.stdin(Stdio::null());
 
     let res = timeout(cfg.total_timeout, c.output()).await.ok()?;
     let res = res.ok()?;
