@@ -94,12 +94,16 @@ pub struct CommandWithOutput {
 /// Returns an error if JSON serialization fails (should be extremely rare).
 pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> Result<String, serde_json::Error> {
     // Convert command records to the format expected by PromptContext
+    // Strip ANSI codes before sending to AI
     let recent_commands: Vec<CommandWithOutput> = ctx
         .recent_commands
         .iter()
-        .map(|record| CommandWithOutput {
-            command: record.command_line.clone(),
-            output: truncate_text(&record.output, 2048),
+        .map(|record| {
+            let cleaned_output = strip_ansi_codes(&record.output);
+            CommandWithOutput {
+                command: record.command_line.clone(),
+                output: truncate_text(&cleaned_output, 2048),
+            }
         })
         .collect();
 
@@ -115,6 +119,47 @@ pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> Result<String, s
     };
 
     serde_json::to_string_pretty(&prompt)
+}
+
+/// Strip ANSI escape codes from text.
+/// Removes color codes, cursor movements, and other terminal control sequences.
+fn strip_ansi_codes(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // ESC sequence started
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                // Skip until we hit a letter (CSI sequence terminator)
+                while let Some(&next_ch) = chars.peek() {
+                    chars.next();
+                    if next_ch.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else if chars.peek() == Some(&']') {
+                // OSC sequence (e.g., OSC 7 for directory)
+                chars.next(); // consume ']'
+                // Skip until we hit BEL (\x07) or ST (\x1b\\)
+                while let Some(&next_ch) = chars.peek() {
+                    chars.next();
+                    if next_ch == '\x07' {
+                        break;
+                    }
+                    if next_ch == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next(); // consume '\\'
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    
+    result
 }
 
 /// Truncate text to a maximum number of bytes, preserving UTF-8 boundaries.
@@ -253,6 +298,60 @@ mod tests {
         let extracted = extract_user_request(&prompt);
 
         assert_eq!(extracted, Some(query.to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_strip_ansi_codes() {
+        // Test basic color codes
+        let input = "\x1b[31mRed text\x1b[0m Normal text";
+        let expected = "Red text Normal text";
+        assert_eq!(strip_ansi_codes(input), expected);
+
+        // Test cursor movement
+        let input = "Line 1\x1b[2J\x1b[HCleared";
+        let expected = "Line 1Cleared";
+        assert_eq!(strip_ansi_codes(input), expected);
+
+        // Test multiple escape sequences
+        let input = "\x1b[1m\x1b[32mBold Green\x1b[0m";
+        let expected = "Bold Green";
+        assert_eq!(strip_ansi_codes(input), expected);
+
+        // Test OSC sequences (e.g., OSC 7 for directory)
+        let input = "Before\x1b]7;file://host/path\x07After";
+        let expected = "BeforeAfter";
+        assert_eq!(strip_ansi_codes(input), expected);
+
+        // Test no escape codes
+        let input = "Plain text";
+        assert_eq!(strip_ansi_codes(input), input);
+    }
+
+    #[test]
+    fn test_build_prompt_strips_ansi() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::context::CommandRecord;
+        
+        let ctx = ContextSnapshot {
+            cwd: "/home/user".to_string(),
+            env_vars: vec![],
+            recent_history: vec![],
+            recent_output: vec![],
+            recent_commands: vec![
+                CommandRecord {
+                    command_line: "ls".to_string(),
+                    output: "\x1b[31mfile1.txt\x1b[0m\n\x1b[32mfile2.txt\x1b[0m\n".to_string(),
+                },
+            ],
+        };
+
+        let prompt = build_prompt("list files", &ctx)?;
+        let parsed: UserPrompt = serde_json::from_str(&prompt)?;
+        
+        // Verify ANSI codes are stripped from output
+        assert_eq!(parsed.context.recent_commands[0].output, "file1.txt\nfile2.txt\n");
+        assert!(!parsed.context.recent_commands[0].output.contains("\x1b"));
+        
         Ok(())
     }
 }
