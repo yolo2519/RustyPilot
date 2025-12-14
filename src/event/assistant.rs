@@ -4,29 +4,24 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::ai::session::AiSessionManager;
+use crate::context::ContextSnapshot;
 use crate::ui::assistant::TuiAssistant;
 
 /// Handle key events when the Assistant pane is active.
 ///
 /// This function processes keyboard input for the assistant sidebar,
 /// including text input, command confirmation, scrolling, and session switching.
-///
-/// # Arguments
-/// * `assistant` - The assistant UI widget
-/// * `ai_sessions` - The AI session manager
-/// * `key_evt` - The key event to handle
-/// * `context` - Current shell context for AI requests
 pub fn handle_key_event(
     assistant: &mut TuiAssistant,
     ai_sessions: &mut AiSessionManager,
-    context_manager: &crate::context::ContextManager,
+    _context_manager: &crate::context::ContextManager,
     key_evt: KeyEvent,
+    context: ContextSnapshot,
 ) -> Result<()> {
-    // Check for pending command confirmation first (Ctrl+Y / Ctrl+N shortcuts)
+    // Check for pending command confirmation first (Y/N shortcuts)
     if assistant.has_pending_command() {
         match key_evt.code {
-            KeyCode::Char('y') | KeyCode::Char('Y')
-                if key_evt.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
                 // Update UI to show command as executed
                 assistant.confirm_command();
 
@@ -37,9 +32,29 @@ pub fn handle_key_event(
 
                 return Ok(());
             }
-            KeyCode::Char('n') | KeyCode::Char('N')
-                if key_evt.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('n') | KeyCode::Char('N') => {
                 assistant.reject_command();
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    // Session management shortcuts (Ctrl+T new, Ctrl+W close)
+    if key_evt.modifiers.contains(KeyModifiers::CONTROL) {
+        match key_evt.code {
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                let id = ai_sessions.new_session();
+                assistant.add_session_tab(id, format!("Session {}", id));
+                assistant.switch_session(id);
+                assistant.load_messages_from_backend(ai_sessions, id);
+                return Ok(());
+            }
+            KeyCode::Char('w') | KeyCode::Char('W') => {
+                let id = assistant.active_session_id();
+                let _ = ai_sessions.close_session(id);
+                // Re-sync UI with backend after deletion.
+                assistant.hydrate_from_backend(ai_sessions);
                 return Ok(());
             }
             _ => {}
@@ -71,13 +86,6 @@ pub fn handle_key_event(
         KeyCode::Home => {
             assistant.move_cursor_to_start();
         }
-
-        // Scroll to bottom with Shift+End or Ctrl+End (must come before plain End)
-        KeyCode::End if key_evt.modifiers.contains(KeyModifiers::SHIFT)
-                     || key_evt.modifiers.contains(KeyModifiers::CONTROL) => {
-            assistant.scroll_to_bottom();
-        }
-
         KeyCode::End => {
             assistant.move_cursor_to_end();
         }
@@ -96,22 +104,15 @@ pub fn handle_key_event(
             assistant.scroll(10);
         }
 
-        // Submit message (Enter) or insert newline (Shift+Enter)
+        // Submit message
         KeyCode::Enter => {
-            if key_evt.modifiers.contains(KeyModifiers::SHIFT) {
-                // Shift+Enter: Insert a newline character
-                assistant.insert_char('\n');
-            } else {
-                // Enter: Submit the message
-                let input = assistant.take_input();
-                if !input.trim().is_empty() {
-                    let session_id = assistant.active_session_id();
-                    assistant.push_user_message(input.clone());
-                    assistant.start_assistant_message();
-                    // Send to AI backend - response will come through ai_stream channel
-                    let context = context_manager.snapshot();
-                    ai_sessions.send_message(session_id, &input, context);
-                }
+            let input = assistant.take_input();
+            if !input.trim().is_empty() {
+                let session_id = assistant.active_session_id();
+                assistant.push_user_message(input.clone());
+                assistant.start_assistant_message();
+                // Send to AI backend - response will come through ai_stream channel
+                ai_sessions.send_message(session_id, &input, context);
             }
         }
 
@@ -122,6 +123,9 @@ pub fn handle_key_event(
             } else {
                 assistant.next_session();
             }
+            let session_id = assistant.active_session_id();
+            ai_sessions.switch_session(session_id);
+            assistant.load_messages_from_backend(ai_sessions, session_id);
         }
 
         _ => {}

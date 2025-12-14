@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod parser;
+pub mod persistence;
 pub mod prompt;
 pub mod session;
 

@@ -81,11 +81,19 @@ impl App {
         };
         let initial_layout = layout_builder.build(initial_area);
 
+        // AI session manager (persistent across restarts)
+        let ai_sessions = AiSessionManager::new(ai_stream_tx, event_sink.clone(), "gpt-4o-mini");
+
+        // UI widgets
+        let tui_terminal = TuiTerminal::new(pty_rx, event_sink.clone());
+        let mut tui_assistant = TuiAssistant::new(ai_stream_rx);
+        tui_assistant.hydrate_from_backend(&ai_sessions);
+
         Ok(Self {
             shell_manager: shell,
-            ai_sessions: AiSessionManager::new(ai_stream_tx, event_sink.clone(), "gpt-4o-mini")?,
-            tui_terminal: TuiTerminal::new(pty_rx, event_sink.clone()),
-            tui_assistant: TuiAssistant::new(ai_stream_rx),
+            ai_sessions,
+            tui_terminal,
+            tui_assistant,
             active_pane: ActivePane::Terminal,
             context_manager: ContextManager::new(),
             exit: false,
@@ -177,6 +185,8 @@ impl App {
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         loop {
             if self.exit {
+                // Persist sessions on exit (best-effort).
+                self.ai_sessions.save_best_effort();
                 break Ok(());
             }
             tokio::select! {
@@ -310,11 +320,13 @@ impl App {
                     }
                     ActivePane::Assistant => {
                         // Get current context snapshot for AI requests
+                        let context = self.context_manager.snapshot();
                         assistant_event::handle_key_event(
                             &mut self.tui_assistant,
                             &mut self.ai_sessions,
                             &self.context_manager,
                             key_evt,
+                            context,
                         )?;
                     }
                 }

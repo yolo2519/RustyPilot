@@ -154,12 +154,91 @@ impl TuiAssistant {
     pub fn switch_session(&mut self, id: SessionId) {
         if self.session_tabs.iter().any(|t| t.id == id) {
             self.active_session = id;
-            // TODO: Load messages for this session from backend
-            // For now, clear messages when switching (backend integration pending)
+            // Messages are loaded from backend by the event handler (or hydrate).
             self.messages.clear();
             self.scroll_offset = 0;
             self.pending_command_idx = None;
         }
+    }
+
+    /// Replace session tabs and message view from backend state (startup / reload).
+    pub fn hydrate_from_backend(&mut self, ai_sessions: &crate::ai::session::AiSessionManager) {
+        let ids = ai_sessions.session_ids();
+        let active = ai_sessions.current_session_id();
+
+        self.session_tabs = ids
+            .iter()
+            .map(|&id| SessionTab {
+                id,
+                name: format!("Session {}", id),
+            })
+            .collect();
+
+        if self.session_tabs.is_empty() {
+            self.session_tabs.push(SessionTab {
+                id: 1,
+                name: "Session 1".to_string(),
+            });
+            self.active_session = 1;
+            self.next_session_id = 2;
+            self.messages.clear();
+            return;
+        }
+
+        self.active_session = if self.session_tabs.iter().any(|t| t.id == active) {
+            active
+        } else {
+            self.session_tabs[0].id
+        };
+
+        let max_id = self.session_tabs.iter().map(|t| t.id).max().unwrap_or(1);
+        self.next_session_id = max_id + 1;
+
+        self.load_messages_from_backend(ai_sessions, self.active_session);
+    }
+
+    /// Load UI messages for `session_id` from backend.
+    pub fn load_messages_from_backend(
+        &mut self,
+        ai_sessions: &crate::ai::session::AiSessionManager,
+        session_id: SessionId,
+    ) {
+        self.messages.clear();
+        self.scroll_offset = 0;
+        self.pending_command_idx = None;
+
+        for (role, content) in ai_sessions.ui_messages(session_id) {
+            match role.as_str() {
+                "user" => self.messages.push(ChatMessage::User { text: content }),
+                "assistant" => self.messages.push(ChatMessage::Assistant {
+                    text: content,
+                    is_streaming: false,
+                }),
+                _ => {}
+            }
+        }
+        self.scroll_to_bottom();
+    }
+
+    pub fn add_session_tab(&mut self, id: SessionId, name: String) {
+        if self.session_tabs.iter().any(|t| t.id == id) {
+            return;
+        }
+        self.session_tabs.push(SessionTab { id, name });
+        self.session_tabs.sort_by_key(|t| t.id);
+        let max_id = self.session_tabs.iter().map(|t| t.id).max().unwrap_or(1);
+        self.next_session_id = max_id + 1;
+    }
+
+    pub fn remove_session_tab(&mut self, id: SessionId) {
+        self.session_tabs.retain(|t| t.id != id);
+        if self.active_session == id {
+            if let Some(first) = self.session_tabs.first() {
+                self.active_session = first.id;
+            }
+        }
+        let max_id = self.session_tabs.iter().map(|t| t.id).max().unwrap_or(1);
+        self.next_session_id = max_id + 1;
     }
 
     /// Add a new session and switch to it
