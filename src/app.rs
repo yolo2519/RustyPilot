@@ -47,6 +47,9 @@ pub struct App {
     command_mode: bool,  // Is the app in the command mode?
     force_redraw_flag: bool,  // Should force a full screen clear and redraw?
 
+    // Shell input tracking
+    shell_input_buffer: String,  // Track user input in shell panel
+
     // Layout builder - holds user preferences/constraints for layout
     layout_builder: LayoutBuilder,
 
@@ -91,6 +94,7 @@ impl App {
             exit: false,
             command_mode: false,
             force_redraw_flag: false,
+            shell_input_buffer: String::new(),
             layout_builder,
             layout: initial_layout,
             user_events: init_user_event(),
@@ -423,7 +427,12 @@ impl App {
                 // Pane-specific event handling (delegated to event module)
                 match self.active_pane {
                     ActivePane::Terminal => {
-                        terminal_event::handle_key_event(&mut self.tui_terminal, &mut self.shell_manager, key_evt)?;
+                        terminal_event::handle_key_event(
+                            &mut self.tui_terminal,
+                            &mut self.shell_manager,
+                            key_evt,
+                            &mut self.shell_input_buffer,
+                        )?;
                     }
                     ActivePane::Assistant => {
                         // Get current context snapshot for AI requests
@@ -431,6 +440,7 @@ impl App {
                             &mut self.tui_assistant,
                             &mut self.ai_sessions,
                             &self.context_manager,
+                            &self.shell_manager,
                             key_evt,
                         )?;
                     }
@@ -483,6 +493,7 @@ impl App {
                 crate::event::terminal::handle_command_mode(
                     &mut self.tui_terminal,
                     &mut self.shell_manager,
+                    &mut self.shell_input_buffer,
                     event,
                 )?;
             }

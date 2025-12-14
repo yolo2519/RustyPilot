@@ -704,6 +704,11 @@ impl AiSessionManager {
             }
         };
 
+        // Log the request JSON
+        if let Ok(request_json) = serde_json::to_string_pretty(&request) {
+            tracing::info!("Sending request to OpenAI API (session {}): {}", session_id, request_json);
+        }
+
         // Clone what we need for the async task
         let stream_tx = self.ai_stream_tx.clone();
         let client = self.client.clone();
