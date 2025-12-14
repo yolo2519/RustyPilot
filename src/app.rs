@@ -61,7 +61,7 @@ pub struct App {
     command_mode: bool,  // Is the app in the command mode?
     force_redraw_flag: bool,  // Should force a full screen clear and redraw?
     needs_draw: bool,
-    next_frame_deadline: Instant,
+    next_frame_deadline: Option<Instant>,
 
     // Mouse drag state for visual selection
     mouse_drag_state: Option<mouse_event::MouseDragState>,
@@ -123,7 +123,7 @@ impl App {
             last_click: None,
             shell_input_buffer: String::new(),
             needs_draw: false,
-            next_frame_deadline: Instant::now(),
+            next_frame_deadline: None,
             layout_builder,
             layout: initial_layout,
             user_events: init_user_event(),
@@ -295,7 +295,18 @@ impl App {
         // of PTY output / AI stream chunks.
         const FRAME: Duration = Duration::from_millis(16);
         let now = Instant::now();
-        self.next_frame_deadline = if asap { now } else { now + FRAME };
+        let requested = if asap { now } else { now + FRAME };
+
+        // Important: don't keep pushing the deadline forward when we keep receiving events.
+        // We want the earliest scheduled draw to win.
+        match self.next_frame_deadline {
+            None => self.next_frame_deadline = Some(requested),
+            Some(existing) => {
+                if requested < existing {
+                    self.next_frame_deadline = Some(requested);
+                }
+            }
+        }
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
@@ -328,7 +339,7 @@ impl App {
                     // PTY output is handled internally by TuiTerminal
                     self.request_draw(false);
                 }
-                _ = tokio::time::sleep_until(self.next_frame_deadline), if self.needs_draw => {
+                _ = tokio::time::sleep_until(self.next_frame_deadline.unwrap_or_else(Instant::now)), if self.needs_draw => {
                     // Check if force redraw is needed (e.g., after stderr pollution)
                     if self.force_redraw_flag {
                         self.force_redraw_flag = false;
@@ -337,6 +348,7 @@ impl App {
                         self.draw(terminal)?;
                     }
                     self.needs_draw = false;
+                    self.next_frame_deadline = None;
                 }
             }
         }
