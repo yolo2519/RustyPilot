@@ -72,6 +72,7 @@ fn truncate_bytes_utf8(s: &str, max_bytes: usize) -> String {
 pub struct Shell2Intent {
     pub want_git: bool,
     pub want_fs: bool,
+    pub want_tools: bool,
 }
 
 async fn run_shell_script(cfg: &Shell2Config, cwd: &str, script: &str) -> Option<String> {
@@ -123,7 +124,11 @@ pub async fn collect_shell2_system_context(ctx: &ContextSnapshot) -> String {
 
 /// Same as `collect_shell2_system_context`, but allows choosing which checks to run.
 pub async fn collect_shell2_system_context_with_intent(ctx: &ContextSnapshot, intent: Shell2Intent) -> String {
-    let cfg = Shell2Config::default();
+    let mut cfg = Shell2Config::default();
+    // Tool version probes can be slightly slower than uname/whoami; allow a bit more time when requested.
+    if intent.want_tools {
+        cfg.total_timeout = Duration::from_millis(1000);
+    }
     let cwd = ctx.cwd.as_str();
 
     // Build a single script to minimize subprocess overhead.
@@ -133,6 +138,21 @@ pub async fn collect_shell2_system_context_with_intent(ctx: &ContextSnapshot, in
 
     script.push_str("printf 'uname:\\n'; uname -srm 2>/dev/null || true; printf '\\n'; ");
     script.push_str("printf 'whoami:\\n'; whoami 2>/dev/null || true; printf '\\n'; ");
+
+    if intent.want_tools {
+        // Tool versions are often crucial for debugging build/tooling issues, but keep it bounded and best-effort.
+        script.push_str("printf 'tools:\\n'; ");
+        script.push_str("for t in rustc cargo git node npm python3 python pip; do ");
+        script.push_str("command -v \"$t\" >/dev/null 2>&1 || continue; ");
+        script.push_str("printf '%s: ' \"$t\"; ");
+        script.push_str("case \"$t\" in ");
+        script.push_str("python|python3) \"$t\" --version 2>&1 | head -n 1 || true ;; ");
+        script.push_str("pip) \"$t\" --version 2>&1 | head -n 1 || true ;; ");
+        script.push_str("*) (\"$t\" --version 2>&1 | head -n 1) || (\"$t\" -v 2>&1 | head -n 1) || true ;; ");
+        script.push_str("esac; ");
+        script.push_str("done; ");
+        script.push_str("printf '\\n'; ");
+    }
 
     if intent.want_fs {
         script.push_str("printf 'ls:\\n'; ls -1 2>/dev/null | head -n 40 || true; printf '\\n'; ");

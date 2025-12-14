@@ -47,6 +47,7 @@ struct Shell2CacheEntry {
     cwd: String,
     want_git: bool,
     want_fs: bool,
+    want_tools: bool,
     text: String,
 }
 
@@ -55,6 +56,13 @@ fn should_force_shell2_refresh(user_input: &str) -> bool {
     // Intent-ish keywords: when user asks about environment/repo/files, refresh shell2 even if TTL is valid.
     // Keep this conservative to avoid unnecessary shell2 runs.
     [
+        "version",
+        "toolchain",
+        "rustc",
+        "cargo",
+        "python",
+        "node",
+        "npm",
         "repo",
         "repository",
         "git",
@@ -99,7 +107,27 @@ fn shell2_intent_from_user_input(user_input: &str) -> Shell2Intent {
     .iter()
     .any(|k| s.contains(k));
 
-    Shell2Intent { want_git, want_fs }
+    let want_tools = [
+        "version",
+        "toolchain",
+        "rust",
+        "rustc",
+        "cargo",
+        "python",
+        "pip",
+        "node",
+        "npm",
+        "build",
+        "compile",
+    ]
+    .iter()
+    .any(|k| s.contains(k));
+
+    Shell2Intent {
+        want_git,
+        want_fs,
+        want_tools,
+    }
 }
 
 // =============================================================================
@@ -783,8 +811,9 @@ impl AiSessionManager {
                 cache.last.as_ref().and_then(|e| {
                     let is_fresh = now.duration_since(e.at) < SHELL2_TTL;
                     let same_cwd = e.cwd == cwd;
-                    let covers_intent =
-                        (!shell2_intent.want_git || e.want_git) && (!shell2_intent.want_fs || e.want_fs);
+                    let covers_intent = (!shell2_intent.want_git || e.want_git)
+                        && (!shell2_intent.want_fs || e.want_fs)
+                        && (!shell2_intent.want_tools || e.want_tools);
 
                     if is_fresh && same_cwd && covers_intent && !force_shell2_refresh {
                         Some(e.text.clone())
@@ -804,6 +833,7 @@ impl AiSessionManager {
                     cwd,
                     want_git: shell2_intent.want_git,
                     want_fs: shell2_intent.want_fs,
+                    want_tools: shell2_intent.want_tools,
                     text: text.clone(),
                 });
                 text
