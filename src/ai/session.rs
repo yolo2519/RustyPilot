@@ -803,7 +803,7 @@ impl AiSessionManager {
                 let text = collect_shell2_system_context_with_intent(&context, shell2_intent).await;
                 let mut cache = shell2_cache.lock().await;
                 cache.last = Some(Shell2CacheEntry {
-                    at: now,
+                    at: Instant::now(),
                     cwd,
                     want_git: shell2_intent.want_git,
                     want_fs: shell2_intent.want_fs,
