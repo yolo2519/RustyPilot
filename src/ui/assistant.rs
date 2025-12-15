@@ -2773,12 +2773,14 @@ fn render_command_card(
 
     // Explanation lines (supports multi-line wrapping)
     if !explanation.is_empty() {
-        let exp_line = format_card_line(explanation, card_width);
-        lines.push(Line::from(vec![
-            Span::styled(" │", border_style),
-            Span::styled(exp_line, border_style),
-            Span::styled("│", border_style),
-        ]));
+        for exp_line in wrap_text(explanation, card_width) {
+            let padded = format!("{:width$}", exp_line, width = card_width);
+            lines.push(Line::from(vec![
+                Span::styled(" │", border_style),
+                Span::styled(padded, border_style),
+                Span::styled("│", border_style),
+            ]));
+        }
     }
 
     // Command line with > prefix
@@ -2863,6 +2865,68 @@ fn format_card_line(text: &str, width: usize) -> String {
         // Pad with spaces
         format!("{:width$}", text, width = width)
     }
+}
+
+/// Wrap text into multiple lines based on width (word-aware wrapping)
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+
+    let mut result = Vec::new();
+    let mut current_line = String::new();
+    let mut current_width = 0;
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+
+        if current_width == 0 {
+            // First word on line
+            if word_len > width {
+                // Word itself is too long, force split
+                let mut chars = word.chars().peekable();
+                while chars.peek().is_some() {
+                    let chunk: String = chars.by_ref().take(width).collect();
+                    result.push(chunk);
+                }
+            } else {
+                current_line = word.to_string();
+                current_width = word_len;
+            }
+        } else if current_width + 1 + word_len <= width {
+            // Word fits on current line with space
+            current_line.push(' ');
+            current_line.push_str(word);
+            current_width += 1 + word_len;
+        } else {
+            // Start new line
+            result.push(current_line);
+            if word_len > width {
+                // Word itself is too long, force split
+                let mut chars = word.chars().peekable();
+                while chars.peek().is_some() {
+                    let chunk: String = chars.by_ref().take(width).collect();
+                    result.push(chunk);
+                }
+                current_line = String::new();
+                current_width = 0;
+            } else {
+                current_line = word.to_string();
+                current_width = word_len;
+            }
+        }
+    }
+
+    // Don't forget the last line
+    if !current_line.is_empty() {
+        result.push(current_line);
+    }
+
+    if result.is_empty() {
+        result.push(String::new());
+    }
+
+    result
 }
 
 /// Render the input box at the bottom with multi-line support and selection highlighting
