@@ -214,6 +214,12 @@ pub struct CommandSuggestionRecord {
     pub explanation: String,
     /// Current status of the suggestion
     pub status: CommandSuggestionStatus,
+    /// Cached security verdict for UI rendering.
+    ///
+    /// This is intentionally NOT persisted; it can be recomputed cheaply on load,
+    /// and avoids repeating evaluation on every redraw/session switch.
+    #[serde(skip)]
+    pub cached_verdict: Option<crate::security::Verdict>,
 }
 
 // =============================================================================
@@ -384,7 +390,10 @@ impl AiSession {
                                     CommandSuggestionStatus::Rejected | CommandSuggestionStatus::Ignored => CommandStatus::Rejected,
                                 };
                                 // Evaluate command security (verdict now contains reason)
-                                let verdict = crate::security::evaluate(&record.command);
+                                let verdict = record
+                                    .cached_verdict
+                                    .clone()
+                                    .unwrap_or_else(|| crate::security::evaluate(&record.command));
                                 messages.push(ChatMessage::CommandCard {
                                     command: record.command.clone(),
                                     explanation: record.explanation.clone(),
@@ -508,13 +517,21 @@ impl AiSessionManager {
 
         let mut sessions = HashMap::new();
         for s in state.sessions {
+            let command_suggestions: Vec<CommandSuggestionRecord> = s
+                .command_suggestions
+                .into_iter()
+                .map(|mut r| {
+                    r.cached_verdict = Some(crate::security::evaluate(&r.command));
+                    r
+                })
+                .collect();
             sessions.insert(
                 s.id,
                 AiSession {
                     id: s.id,
                     conversation_history: s.conversation_history,
                     current_response: String::new(),
-                    command_suggestions: s.command_suggestions,
+                    command_suggestions,
                     // Never resume "pending" tool-call decisions across restarts.
                     pending_suggestion_indices: Vec::new(),
                 },
@@ -1183,6 +1200,7 @@ impl AiSessionManager {
                         command: suggestion.command.clone(),
                         explanation: suggestion.explanation.clone(),
                         status: CommandSuggestionStatus::Pending,
+                        cached_verdict: Some(crate::security::evaluate(&suggestion.command)),
                     };
                     session.command_suggestions.push(record);
                     // Track this as a pending suggestion
