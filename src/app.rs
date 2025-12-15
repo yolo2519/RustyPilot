@@ -533,6 +533,22 @@ impl App {
                 return Ok(());
             }
 
+            // Left arrow => shrink terminal pane (move separator left)
+            // Note: Does NOT exit command mode, allowing continuous adjustment
+            UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Left) => {
+                let current = self.split_ratio();
+                self.set_split_ratio(current.saturating_sub(2));
+                return Ok(());
+            }
+
+            // Right arrow => expand terminal pane (move separator right)
+            // Note: Does NOT exit command mode, allowing continuous adjustment
+            UserEvent::Key(e) if matches!(e.kind, KeyEventKind::Press) && matches!(e.code, KeyCode::Right) => {
+                let current = self.split_ratio();
+                self.set_split_ratio(current.saturating_add(2));
+                return Ok(());
+            }
+
             _ => {}
         }
 
