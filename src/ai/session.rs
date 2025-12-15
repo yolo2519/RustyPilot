@@ -9,8 +9,10 @@
 //! The `suggest_command` tool is defined and AI will use it to suggest shell commands.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::{Context as AnyhowContext, Result as AnyhowResult};
 use async_openai::error::OpenAIError;
 use async_openai::types::{
     ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
@@ -23,7 +25,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc::{Receiver, Sender, UnboundedSender}, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::context::ContextSnapshot;
 use crate::event::{AiStreamData, AiUiUpdate, AppEvent};
@@ -189,7 +191,7 @@ fn create_suggest_command_tool() -> ChatCompletionTool {
 // =============================================================================
 
 /// Status of a command suggestion in the session history
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandSuggestionStatus {
     /// Waiting for user decision
     Pending,
@@ -202,7 +204,7 @@ pub enum CommandSuggestionStatus {
 }
 
 /// A record of a command suggestion and its outcome
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandSuggestionRecord {
     /// The tool call ID from OpenAI (used for Tool message response)
     pub tool_call_id: String,
@@ -212,6 +214,50 @@ pub struct CommandSuggestionRecord {
     pub explanation: String,
     /// Current status of the suggestion
     pub status: CommandSuggestionStatus,
+}
+
+// =============================================================================
+// Persistence (best-effort)
+// =============================================================================
+
+const PERSISTENCE_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedAiSession {
+    id: SessionId,
+    conversation_history: Vec<ChatCompletionRequestMessage>,
+    command_suggestions: Vec<CommandSuggestionRecord>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedAiState {
+    version: u32,
+    current_id: SessionId,
+    next_id: SessionId,
+    sessions: Vec<PersistedAiSession>,
+}
+
+fn default_persist_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".rusty-term").join("ai_sessions.json"))
+}
+
+fn write_atomic(path: &PathBuf, bytes: &[u8]) -> AnyhowResult<()> {
+    let parent = path
+        .parent()
+        .map(PathBuf::from)
+        .context("Persistence path has no parent directory")?;
+
+    std::fs::create_dir_all(&parent)
+        .with_context(|| format!("Failed to create persistence directory: {}", parent.display()))?;
+
+    let mut tmp = path.clone();
+    tmp.set_extension("json.tmp");
+    std::fs::write(&tmp, bytes)
+        .with_context(|| format!("Failed to write temp persistence file: {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("Failed to atomically replace persistence file: {}", path.display()))?;
+    Ok(())
 }
 
 // =============================================================================
@@ -352,6 +398,7 @@ pub struct AiSessionManager {
     sessions: HashMap<SessionId, AiSession>,
     current_id: SessionId,
     next_id: SessionId,
+    persist_path: Option<PathBuf>,
     /// Sender for spawned async tasks to send streaming data
     ai_stream_tx: Sender<AiStreamData>,
     /// Receiver for processing streaming data from API tasks
@@ -379,6 +426,7 @@ impl AiSessionManager {
             sessions: HashMap::new(),
             current_id: 1,
             next_id: 2,
+            persist_path: default_persist_path(),
             ai_stream_tx,
             ai_stream_rx,
             app_event_tx,
@@ -386,8 +434,102 @@ impl AiSessionManager {
             model: model.into(),
             shell2_cache: Arc::new(Mutex::new(Shell2Cache::default())),
         };
-        manager.sessions.insert(1, AiSession::new(1, system_prompt)?);
+
+        // Best-effort load persisted sessions. If anything goes wrong, fall back to a fresh session.
+        let loaded = manager.try_load_persisted().unwrap_or_else(|e| {
+            warn!("Failed to load persisted AI sessions: {:#}", e);
+            false
+        });
+
+        if !loaded {
+            manager.sessions.insert(1, AiSession::new(1, system_prompt)?);
+        }
         Ok(manager)
+    }
+
+    fn build_persisted_state(&self) -> PersistedAiState {
+        let mut sessions: Vec<PersistedAiSession> = self
+            .sessions
+            .values()
+            .map(|s| PersistedAiSession {
+                id: s.id,
+                conversation_history: s.conversation_history.clone(),
+                command_suggestions: s.command_suggestions.clone(),
+            })
+            .collect();
+        sessions.sort_by_key(|s| s.id);
+
+        PersistedAiState {
+            version: PERSISTENCE_VERSION,
+            current_id: self.current_id,
+            next_id: self.next_id,
+            sessions,
+        }
+    }
+
+    fn try_load_persisted(&mut self) -> AnyhowResult<bool> {
+        let Some(path) = &self.persist_path else {
+            return Ok(false);
+        };
+
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e).with_context(|| format!("Failed to read {}", path.display())),
+        };
+
+        let state: PersistedAiState = serde_json::from_slice(&bytes)
+            .with_context(|| format!("Failed to parse JSON in {}", path.display()))?;
+
+        if state.version != PERSISTENCE_VERSION {
+            return Ok(false);
+        }
+
+        let mut sessions = HashMap::new();
+        for s in state.sessions {
+            sessions.insert(
+                s.id,
+                AiSession {
+                    id: s.id,
+                    conversation_history: s.conversation_history,
+                    current_response: String::new(),
+                    command_suggestions: s.command_suggestions,
+                    // Never resume "pending" tool-call decisions across restarts.
+                    pending_suggestion_indices: Vec::new(),
+                },
+            );
+        }
+
+        if sessions.is_empty() {
+            return Ok(false);
+        }
+
+        let max_id = sessions.keys().copied().max().unwrap_or(0);
+        self.sessions = sessions;
+        self.current_id = if self.sessions.contains_key(&state.current_id) {
+            state.current_id
+        } else {
+            *self.sessions.keys().min().unwrap_or(&1)
+        };
+        self.next_id = state.next_id.max(max_id.saturating_add(1));
+        Ok(true)
+    }
+
+    /// Persist all currently-open sessions to disk (best-effort).
+    ///
+    /// Sessions that were manually closed are already removed from memory and will not be saved.
+    pub fn save_persisted(&self) -> AnyhowResult<()> {
+        let Some(path) = &self.persist_path else {
+            return Ok(());
+        };
+
+        let mut bytes = serde_json::to_vec_pretty(&self.build_persisted_state())
+            .context("Failed to serialize AI session state")?;
+        bytes.push(b'\n');
+
+        write_atomic(path, &bytes)
+            .with_context(|| format!("Failed to persist AI sessions to {}", path.display()))?;
+        Ok(())
     }
 
     pub fn current_session(&self) -> Option<&AiSession> {
