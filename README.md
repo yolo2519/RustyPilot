@@ -169,7 +169,7 @@ The AI will respond with:
 The Command Card displays:
 - The suggested command
 - A brief explanation
-- A **Security Verdict** (see below)
+- A Security Verdict
 - Action buttons
 
 #### Step 4: Confirm or Reject
@@ -179,16 +179,6 @@ The Command Card displays:
 - To request revisions, explanations, or other suggestions, simply type your follow-up. This will automatically reject any pending commands.
 
 ![Command Suggestion](assets/command_suggestion.png)
-
-### Security Verdicts
-
-RustyTerm includes a security layer that evaluates AI-suggested commands before execution. Each command receives one of three verdicts:
-
-| Verdict | Display | Description | User Action |
-|---------|---------|-------------|-------------|
-| **Allow** | Green checkmark | Safe, read-only commands (e.g., `ls`, `pwd`, `git status`) | Press `Y` to run directly |
-| **RequireConfirmation** | Yellow warning | Commands that modify files (e.g., `rm`, `cp`, `git add`) | Press `Y` to confirm and run |
-| **Deny** | Red X | Dangerous commands with shell operators (e.g., pipes `\|`, redirects `>`, `&&`) | Execution blocked; use `C` to copy only |
 
 ### Session Management
 
