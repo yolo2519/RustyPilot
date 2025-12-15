@@ -9,207 +9,206 @@
 | Irys Zhang  | 1012794424     | irys.zhang@mail.utoronto.ca  |
 | Yushun Tang | 1011561962     | yushun.tang@mail.utoronto.ca |
 
+---
+
+## Reproducibility Guide
+
+This section provides step-by-step instructions to set up the runtime environment and build the project.
+
+### System Requirements
+
+| Requirement | Details |
+|-------------|---------|
+| Operating System | Unix-like systems only (macOS, Linux). **Windows is NOT supported.** |
+| Rust Version | 1.90 or later |
+| Shell | zsh (tested and recommended), bash (should work but untested) |
+| OpenAI API Key | Required for AI assistant functionality |
+
+### Step 1: Install Rust Toolchain
+
+If you don't have Rust installed, install it via rustup:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+After installation, ensure your Rust version is 1.90 or later:
+
+```bash
+rustc --version
+# Expected output: rustc 1.90.0 or higher
+```
+
+### Step 2: Clone the Repository
+
+```bash
+git clone https://github.com/user/rtdbg.git
+cd rtdbg
+```
+
+### Step 3: Set Up OpenAI API Key
+
+RustyTerm requires an OpenAI API key to enable AI assistant functionality. Set the environment variable:
+
+```bash
+export OPENAI_API_KEY="your-api-key-here"
+```
+
+If you want to make this persistent, add the export command to your shell configuration file (`~/.zshrc` for zsh or `~/.bashrc` for bash).
+
+### Step 4: Build and Run
+
+Build and run the application in release mode for optimal performance:
+
+```bash
+cargo run --release
+```
+
+### Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| `OPENAI_API_KEY not set` error | Ensure the environment variable is exported in your current shell session |
+| Build fails with Rust version error | Update Rust: `rustup update` |
+| Terminal display issues | Ensure your terminal supports 256 colors and has sufficient size (minimum 80x24) |
 
 ---
 
-## **Introduction**
+## User's Guide
 
-In the modern developer workflow, the command line interface (CLI) remains one of the most powerful tools for interacting with a system. Although the command line interface is widely used, many developers, including those with significant experience, often find it challenging to recall the exact syntax, flags, or command combinations. Simple tasks such as searching files, piping output, or setting permissions often require looking up documentation or consulting online AI tools like ChatGPT or Claude. This constant context-switching between the terminal and browser interrupts workflow and reduces productivity.
+This section explains how to use each of the main features in RustyTerm.
 
-This proposal presents a Rust-based AI assistant integrated directly into the command line environment, inspired by tools like GitHub Copilot but designed specifically for shell interactions. The goal is to provide a smooth, intelligent, and secure experience where users can query, generate, and execute shell commands seamlessly without leaving the terminal. The assistant will be implemented as a Text-based User Interface (TUI) application, combining the robustness and safety of Rust with modern AI integration and system-level concurrency.
+### Interface Overview
 
-## **Motivation**
+RustyTerm provides a split-screen TUI (Text User Interface) with two panes:
 
-The primary motivation behind this project is to simplify and streamline the user experience in shell environments. Developers and system administrators often encounter repetitive challenges when they know the task they want to perform but cannot remember the precise command syntax to achieve it. Searching for solutions in web browsers or AI chats forces a disruptive switch from the terminal to another application, breaking cognitive flow.
+![RustyTerm Interface Assistant Active](assets/ui_assistant_activated.png)
 
-### **1\. Addressing a Real-World Pain Point**
 
-When using Unix-like shells such as Zsh or Bash, users often need to perform operations such as text processing with *awk*, searching with *grep*, or network configuration with *curl* \- commands that can be complex and easy to forget. This proposal seeks to solve that inefficiency by bringing AI-powered command assistance directly into the shell interface. Instead of copying and pasting between ChatGPT and the terminal, users will receive instant, context-aware command suggestions within the same environment.
+- **Terminal Panel (Left)**: A fully functional shell session where you can execute commands directly
+- **Assistant Panel (Right)**: AI-powered chat interface for natural language queries and command suggestions
 
-### **2\. Integration vs. Fragmentation**
+The border of active pane is highlighted.
 
-Current AI tools such as ChatGPT, Claude, or AIChat provide excellent conversational capabilities but often require users to switch applications or run separate shell commands to interact with the assistant. For instance, AIChat operates as an inline command (*aichat 'query'*), which leaves chat history within the command buffer and disrupts the terminal’s cleanliness. In contrast, our proposed system draws inspiration from Cursor’s sidebar interface and the layout flexibility of tmux, integrating an intelligent, interactive side panel directly within the shell environment. This approach maintains a clear workspace, ensures smooth interaction, and enhances usability by allowing users to focus on their workflow without unnecessary context switching.
+### Keyboard Shortcuts
 
-### **3\. Relevance to the Rust Ecosystem**
+RustyTerm uses a command mode system (similar to tmux or vim) for navigation and control.
 
-Rust is an ideal language for developing such a tool due to its performance, safety, and concurrency capabilities. The Rust ecosystem offers multiple mature libraries for TUI development, such as *tui-rs* and *ratatui*, as well as async runtimes like *tokio* for managing concurrent AI requests. Developing this assistant takes full advantage of Rust’s ecosystem strengths and addresses a current gap in the field, as there are very few Rust-based AI terminal integrations that offer interactive, multi-session functionality.
+#### Command Mode
 
-### **4\. Broader Impact and Innovation**
+Press `Ctrl+B` to enter command mode. While in command mode, the available keyboard shortcuts are displayed.
 
-Beyond developer convenience, this project contributes to the ongoing discussion of human-AI interaction in low-UI environments. By embedding AI into the shell, we move toward more intelligent and context-aware interfaces that effectively bridge human intent with system execution. The assistant represents a step toward a natural-language-operable terminal, an innovation that could influence the design of future developer tools and AI-powered systems.
+![Command Mode](assets/command_mode.png)
 
-## **Objective and key features**
 
-The primary objective of this project is to design and implement a Rust-based AI assistant for shell environments that provides intelligent, secure, and context-aware command recommendations. The proposed system will operate as a split-screen TUI application: the left pane will contain a functional shell environment (e.g.,Zsh), and the right pane will host the AI assistant interface.
+#### Normal Mode (Terminal Panel)
 
-### **1\. Core Objectives**
+When the Terminal panel is active, all keyboard input except for `Ctrl + B` is sent directly to the shell, just like a regular terminal.
 
-* Enhance productivity by reducing time spent switching between applications for command lookup.
-* Provide AI-generated command suggestions that are contextually relevant to the user’s current working directory, environment variables, and command history.
-* Ensure transparency and control by allowing users to review and understand AI-suggested commands before execution.
-* Demonstrate the potential of Rust for building robust, concurrent, and user-friendly terminal applications.
+To send `Ctrl + B` to shell, use `Ctrl + B` `Ctrl + B`.
 
-### **2\. Key Features**
+#### Normal Mode (Assistant Panel)
 
-#### **2.1. TUI Split Interface**
+When the Assistant panel is active, the behavior is mostly like interacting with an input box, with a few exceptions:
 
-* The interface will feature a dual-pane layout, similar to modern IDEs like VSCode or Cursor.
-* The left pane will host the active shell session (Zsh or Bash).
-* The right pane will serve as the AI sidebar, where users can type queries, receive suggestions, and interact with the assistant.
-* Navigation between panes will be keyboard-driven for efficiency.
+| Key | Action |
+|-----|--------|
+| `Enter` | Send query to the AI |
+| `Ctrl + O` | Insert newline (for multi-line input) |
+| `Tab` | Switch to next AI session |
+| `Ctrl + Y` | Execute (or copy if denied by ) the suggested command |
+| `Ctrl + N` | Reject command suggestions |
+| `Ctrl + A` | Cycle to next command suggestion (if there are more than one suggestions) |
 
-#### **2.2. AI Command Suggestions**
+#### Scrolling
 
-The assistant will process natural-language input (e.g., “find all Python files larger than 1MB”) and return an appropriate shell command. The user can then choose among several actions:
+Both panels support scrollback.
 
-* **Explain:** Ask the AI to explain what the suggested command does and its potential side effects.
-* **Accept:** Paste the command into the shell (configurable for automatic or manual execution).
-* **Revise:** Request an improved or modified version of the command.
-* **Decline:** Dismiss the suggestion.
+| Key | Action |
+|-----|--------|
+| `Shift + Up/Down` | Scroll one line |
+| `Shift + PageUp/PageDown` | Scroll 10 lines |
+| `Shift + End` | Scroll to bottom |
+| `Esc` | Exit scroll mode (Assistant only) |
 
-#### **2.3. Context Awareness**
+#### Visual Mode
 
-The assistant will, optionally, read contextual data such as:
+Enter visual mode by pressing `Ctrl + B` then `V`. Visual mode allows cursor-based navigation and text selection (vim-style).
 
-* The current working directory (*cwd*)
-* Environment variables
-* Output of the previous command
-  This feature enables the AI to tailor suggestions accurately (e.g., knowing when the user is in a Git repository or a project directory).
+| Key | Action |
+|-----|--------|
+| `h/j/k/l` or Arrow keys | Move cursor |
+| `Space` | Cycle selection mode: None → Line → Block |
+| `y` | Copy selected text |
+| `Shift + Up/Down` | Scroll without moving cursor |
+| `PageUp/PageDown` | Scroll 10 lines |
+| `1-9` | Repeat count prefix (e.g., `5j` moves down 5 lines) |
+| `Esc` | Clear selection, or exit visual mode if no selection |
 
-#### **2.4. Security and Trust Layer**
+![Visual Mode](assets/visual_select.png)
 
-Given that AI-generated commands may involve sensitive operations, a security module will be developed.
+### Using the AI Assistant
 
-* Commands will be analyzed before execution to detect potentially harmful operations (e.g., *rm \-rf* /).
-* A user-defined allowlist will specify which operations the AI is permitted to perform automatically.
-* Potentially dangerous commands will trigger warnings or require confirmation.
+#### Step 1: Ask a Question
 
-#### **2.5. Session and Context Management**
+Switch to the Assistant panel. Type your question in natural language. For example:
 
-* Multiple AI sessions will be supported, allowing users to maintain different tasks or topics (e.g., debugging vs. file management).
-* Session context will persist temporarily, enabling conversational continuity and iterative command refinement.
+- "list all rust files in this directory"
+- "find files larger than 10MB"
+- "show git commit history"
+- "check disk usage"
 
-#### **2.6. Extensibility**
+Press `Enter` to send your query.
 
-While the core product focuses on shell command assistance, the architecture will allow for future extensions such as:
+#### Step 3: Review the AI Response
 
-* Integration with code editors (e.g., Neovim)
-* Command analytics for frequently used operations
-* Multi-language shell support (Zsh, Bash, Fish)
-* Cloud-based AI model connections for personalized training.
+The AI will respond with:
+- A natural language response
+- Or, a **Command Card** containing the suggested shell command if requested to generate a command.
 
-### **3\. Innovation and Differentiation**
+The Command Card displays:
+- The suggested command
+- A brief explanation
+- A **Security Verdict** (see below)
+- Action buttons
 
-Unlike existing solutions that either occupy the terminal space or clutter command history, this project introduces a cleanly integrated visual and conversational layer inside the shell. The assistant will not merely act as a chatbot; it will augment the command-line experience, enabling direct interaction between human intent and system command execution. This represents a meaningful innovation in the space of developer productivity tools.
+#### Step 4: Confirm or Reject
 
-## **Tentative plan**
+- Press `Ctrl+Y` to accept the command. Low-risk commands will be injected directly into the terminal. High-risk commands will be copied to your clipboard.
+- Press `Ctrl+N` to reject the suggestion.
+- To request revisions, explanations, or other suggestions, simply type your follow-up. This will automatically reject any pending commands.
 
-The development process will be structured in three major phases \- Design & Prototyping, Implementation & Testing, and Evaluation & Refinement. Each phase will last approximately 3-4 weeks, aligning with a standard semester timeline.
+![Command Suggestion](assets/command_suggestion.png)
 
-### **Phase 1: Design and Prototyping (Weeks 1–4)**
+### Security Verdicts
 
-**Goals:**
+RustyTerm includes a security layer that evaluates AI-suggested commands before execution. Each command receives one of three verdicts:
 
-* Finalize system architecture and user interface layout.
-* Research existing Rust TUI frameworks (*tui-rs, ratatui, crossterm*) and select the most suitable.
-* Design the AI integration layer by connecting directly to an external API service, such as the OpenAI API, for generating command suggestions and explanations.
-* Build wireframes of the split-screen interface and interaction flow.
+| Verdict | Display | Description | User Action |
+|---------|---------|-------------|-------------|
+| **Allow** | Green checkmark | Safe, read-only commands (e.g., `ls`, `pwd`, `git status`) | Press `Y` to run directly |
+| **RequireConfirmation** | Yellow warning | Commands that modify files (e.g., `rm`, `cp`, `git add`) | Press `Y` to confirm and run |
+| **Deny** | Red X | Dangerous commands with shell operators (e.g., pipes `\|`, redirects `>`, `&&`) | Execution blocked; use `C` to copy only |
 
-**Deliverables:**
+### Session Management
 
-* Preliminary design document and mockups.
-* CLI-based prototype demonstrating text input and output in a dual-pane layout.
+RustyTerm supports multiple AI conversation sessions, allowing you to maintain separate contexts for different tasks.
 
-### **Phase 2: Implementation and Testing (Weeks 5–9)**
+- **Create a new session**: In command mode (`Ctrl+B`), create a new session to start a fresh conversation.
 
-**Goals:**
+- **Switching between sessions**: Press `Tab` to switch to the next session. Session tabs are displayed at the top of the Assistant panel.
 
-* Implement TUI structure with concurrency support using *tokio*.
-* Integrate shell (Zsh/Bash) subprocess management for command execution.
-* Implement the AI backend for natural-language interpretation and command generation using the *`async-openai`* crate to handle asynchronous API communication efficiently.
-* Develop a security module (command analyzer and allowlist system).
-* Add explain/accept/revise/decline functionality with keyboard shortcuts.
+- **Close a session**: Press `W` in command mode to close the current session. If it's the last session, it will be cleared instead of closed.
 
-**Deliverables:**
+### Mouse Support
 
-* Fully functional TUI prototype with interactive shell and AI sidebar.
-* Security checks in place for unsafe command detection.
-* Internal test cases for user interactions and command execution.
+RustyTerm supports these mouse operations:
 
-### **Phase 3: Evaluation, Optimization, and Refinement (Weeks 10–13)**
+- **Click** to focus a pane
+- **Click** on session tabs to create, close and switch sessions.
+- **Drag the separator** between panes to resize them
+- **Scroll** to navigate through terminal output or chat history
+- **Double-click** to select a word
+- **Triple-click** to select a line
 
-**Goals:**
-
-* Conduct usability testing with peers and gather feedback on command accuracy, safety, and UI clarity.
-* Optimize performance and memory usage.
-* Implement optional context awareness features (e.g., reading last command output).
-* Prepare final presentation and documentation.
-
-**Deliverables:**
-
-* Completed application with stable performance.
-* Final report documenting design choices, limitations, and future work.
-
-### **Division of Work and Roles**
-
-Each team member will specialize in one domain, ensuring both focus and collaboration:
-
-| Category | Task Description | Yushun Tang | Weijie Zhu | Irys Zhang |
-| :---- | :---- | :---- | :---- | :---- |
-| UI/UX Development | TUI layout design using *tui-rs* / *ratatui* | ✓ | ✓ |  |
-|  | Keyboard navigation and shortcut implementation | ✓ | ✓ |  |
-|  | Input handling and user feedback collection  | ✓ |  | ✓ |
-|  | Color theme, text hierarchy, and layout responsiveness | ✓ |  | ✓ |
-| AI Integration | API setup and connection management (e.g., OpenAI API) |  | ✓ |  |
-|  | Prompt design and structured response parsing |  | ✓ | ✓ |
-|  | Natural language understanding and command mapping |  | ✓ |  |
-|  | Implement “Explain / Accept / Revise / Decline” actions |  | ✓ | ✓ |
-| System Development | Shell integration and subprocess handling |  |  | ✓ |
-|  | Concurrency management using *tokio* |  |  | ✓ |
-|  | Context capturing (CWD, environment variables, history) | ✓ |  | ✓ |
-|  | Security module (allowlist, command validation) |  | ✓ | ✓ |
-| Testing & Documentation | Unit and integration test design | ✓ | ✓ | ✓ |
-|  | Usability testing and user feedback analysis | ✓ | ✓ | ✓ |
-|  | Technical documentation and user guide writing | ✓ | ✓ | ✓ |
-|  | Final presentation and report preparation | ✓ | ✓ | ✓ |
-
-##
-
-### **Development Tools and Libraries**
-
-* **Language:** Rust
-* **Libraries:** *tui-rs / ratatui, tokio, serde, reqwest, crossterm*
-* **AI Backend:** OpenAI API or equivalent LLM interface
-* **Version Control:** GitHub
-* **Testing Framework:** *cargo test* with mock input/output validation
-
-  ###
-
-### **Evaluation Metrics**
-
-Project success will be assessed through a combination of practical testing, and basic performance checks. The evaluation will focus on whether the system functions reliably and provides a smooth, helpful user experience.
-
-* **Functionality Accuracy:** Evaluate how often the AI produces reasonable or partially correct command suggestions based on user prompts.
-* **System Responsiveness:** Observe whether the TUI and shell interactions remain stable and responsive during normal use.
-* **Basic Safety Checks:** Confirm that the program avoids executing clearly unsafe commands and handles unexpected inputs gracefully.
-
-### **Expected Outcomes and Learning Goals**
-
-This project will yield a fully functional AI-powered TUI shell assistant and deepen the team’s understanding of key Rust and systems programming concepts. Expected learning outcomes include:
-
-1. **Advanced Rust Programming:** Mastery of concurrency, error handling, and asynchronous programming.
-2. **TUI Design and Usability:** Understanding terminal rendering, event-driven architecture, and input handling.
-3. **AI and API Integration:** Practical experience in connecting language models to real-world interfaces.
-4. **Security Awareness:** Implementing safe execution layers in system-level tools.
-5. **Team Collaboration:** Coordinating development tasks and integrating modular components efficiently.
-
-The resulting product will not only demonstrate technical competence but also serve as a valuable contribution to the open-source Rust ecosystem, potentially inspiring future tools and research into AI-assisted command-line systems.
-
-## **Conclusion**
-
-This proposal outlines a comprehensive plan to design and implement an AI-powered shell assistant in Rust, addressing a common productivity bottleneck among developers: the constant need to recall or look up shell commands. By merging AI assistance directly into the terminal environment, this project aims to create a fluid, context-aware, and secure user experience that enhances both efficiency and learning.
-
-The assistant represents a fusion of practical utility, technical challenge, and innovation, utilizing Rust’s concurrency and safety features to create a robust and interactive TUI. Beyond its immediate functionality, the project embodies a forward-looking vision: bringing AI into everyday developer workflows seamlessly and responsibly.
-
-In achieving this, our team expects not only to produce a valuable tool but also to gain deep insight into system design, AI integration, and the human factors that shape the future of programming interfaces.
-
+Mouse events are forwarded to mouse-supported programs (e.g., vim) when the terminal panel is active.
