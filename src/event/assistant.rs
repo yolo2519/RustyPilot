@@ -213,11 +213,11 @@ pub fn handle_key_event(
             }
         }
 
-        // Scrolling (with Shift modifier for scroll, Ctrl+Shift for selection+scroll)
-        KeyCode::Up if shift && ctrl => {
+        // Scrolling (with Shift modifier)
+        KeyCode::Up if shift => {
             assistant.scroll(-1);
         }
-        KeyCode::Down if shift && ctrl => {
+        KeyCode::Down if shift => {
             assistant.scroll(1);
         }
         KeyCode::PageUp if shift => {
