@@ -346,12 +346,25 @@ fn handle_mouse_down(
                                 return Ok(());
                             }
                             MessageAreaClickResult::ExecuteCommand(_msg_idx) => {
-                                // Execute the pending command
+                                // Execute or copy the pending command (depending on verdict)
                                 let session_id = assistant.active_session_id();
                                 let pending_idx = assistant.current_suggestion_index();
-                                if let Some(command) = ai_sessions.accept_suggestion(session_id, pending_idx) {
-                                    assistant.confirm_command();
-                                    ai_sessions.execute_suggestion(session_id, command)?;
+
+                                // Check if the command is denied (should copy instead of execute)
+                                if assistant.is_pending_command_denied() {
+                                    // Deny verdict: copy to clipboard instead of executing
+                                    if assistant.copy_pending_command().is_some() {
+                                        // Update backend state
+                                        ai_sessions.reject_suggestion(session_id);
+                                    }
+                                } else {
+                                    // Allow/RequireConfirmation verdict: execute the command
+                                    if let Some(command) = ai_sessions.accept_suggestion(session_id, pending_idx) {
+                                        // Update UI to show command as executed
+                                        assistant.confirm_command();
+                                        // Tell the session manager to execute the suggested command
+                                        ai_sessions.execute_suggestion(session_id, command)?;
+                                    }
                                 }
                                 return Ok(());
                             }

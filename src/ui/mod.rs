@@ -189,6 +189,7 @@ fn render_command_mode_hint(screen_area: Rect, buf: &mut Buffer, fg_color: Color
         (" N".into(), "Toggle active pane".into()),
         (" Q".into(), "Exit program".into()),
         (" L".into(), "Force redraw (clear screen)".into()),
+        (" ←/→".into(), "Adjust separator".into()),
         (" <Any>".into(),"Quit command mode".into())
     ];
 
