@@ -237,6 +237,22 @@ struct PersistedAiState {
     sessions: Vec<PersistedAiSession>,
 }
 
+// Borrowed variants for fast serialization without deep cloning.
+#[derive(Debug, Serialize)]
+struct PersistedAiSessionRef<'a> {
+    id: SessionId,
+    conversation_history: &'a [ChatCompletionRequestMessage],
+    command_suggestions: &'a [CommandSuggestionRecord],
+}
+
+#[derive(Debug, Serialize)]
+struct PersistedAiStateRef<'a> {
+    version: u32,
+    current_id: SessionId,
+    next_id: SessionId,
+    sessions: Vec<PersistedAiSessionRef<'a>>,
+}
+
 fn default_persist_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".rusty-term").join("ai_sessions.json"))
@@ -447,19 +463,24 @@ impl AiSessionManager {
         Ok(manager)
     }
 
-    fn build_persisted_state(&self) -> PersistedAiState {
-        let mut sessions: Vec<PersistedAiSession> = self
-            .sessions
-            .values()
-            .map(|s| PersistedAiSession {
-                id: s.id,
-                conversation_history: s.conversation_history.clone(),
-                command_suggestions: s.command_suggestions.clone(),
+    fn build_persisted_state_ref(&self) -> PersistedAiStateRef<'_> {
+        // Keep deterministic ordering for stable files/diffs.
+        let mut ids: Vec<SessionId> = self.sessions.keys().copied().collect();
+        ids.sort_unstable();
+
+        let sessions: Vec<PersistedAiSessionRef<'_>> = ids
+            .into_iter()
+            .filter_map(|id| {
+                let s = self.sessions.get(&id)?;
+                Some(PersistedAiSessionRef {
+                    id: s.id,
+                    conversation_history: &s.conversation_history,
+                    command_suggestions: &s.command_suggestions,
+                })
             })
             .collect();
-        sessions.sort_by_key(|s| s.id);
 
-        PersistedAiState {
+        PersistedAiStateRef {
             version: PERSISTENCE_VERSION,
             current_id: self.current_id,
             next_id: self.next_id,
@@ -523,7 +544,8 @@ impl AiSessionManager {
             return Ok(());
         };
 
-        let mut bytes = serde_json::to_vec_pretty(&self.build_persisted_state())
+        // Use compact JSON for speed + smaller files.
+        let mut bytes = serde_json::to_vec(&self.build_persisted_state_ref())
             .context("Failed to serialize AI session state")?;
         bytes.push(b'\n');
 
