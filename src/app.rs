@@ -20,7 +20,6 @@ use anyhow::{Context, Result};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tokio::time::{Duration, Instant};
-use tracing::error;
 
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
@@ -95,15 +94,6 @@ impl App {
 
         let (shell, pty_rx) = ShellManager::new(event_sink.clone(), cols, rows)?;
 
-        // AI sessions are loaded (best-effort) inside AiSessionManager::new().
-        // Sync initial UI state from the manager so persisted sessions show up immediately.
-        let ai_sessions = AiSessionManager::new(event_sink.clone(), "gpt-4o-mini")?;
-        let mut tui_assistant = TuiAssistant::new();
-        tui_assistant.sync_session_tabs(ai_sessions.get_session_tabs());
-        let current_id = ai_sessions.current_session_id();
-        tui_assistant.switch_session(current_id);
-        tui_assistant.load_messages(ai_sessions.get_session_messages(current_id));
-
         // Create layout builder with default preferences
         let layout_builder = LayoutBuilder::new();
 
@@ -118,9 +108,10 @@ impl App {
 
         Ok(Self {
             shell_manager: shell,
-            ai_sessions,
+            // AiSessionManager now owns its own stream channel internally
+            ai_sessions: AiSessionManager::new(event_sink.clone(), "gpt-4o-mini")?,
             tui_terminal: TuiTerminal::new(pty_rx, event_sink.clone()),
-            tui_assistant,
+            tui_assistant: TuiAssistant::new(),
             active_pane: ActivePane::Terminal,
             context_manager: ContextManager::new(),
             exit: false,
@@ -319,9 +310,6 @@ impl App {
         self.request_draw(true);
         loop {
             if self.exit {
-                if let Err(e) = self.ai_sessions.save_persisted() {
-                    error!("Failed to persist AI sessions on shutdown: {:#}", e);
-                }
                 break Ok(());
             }
             tokio::select! {
