@@ -232,3 +232,49 @@ RustyTerm supports these mouse operations:
 - **Triple-click** to select a line
 
 Mouse events are forwarded to mouse-supported programs (e.g., vim) when the terminal panel is active.
+
+---
+
+## **Contributions by each team member**
+
+- **Weijie (Shell & Context Subsystems)**
+  - Built the PTY shell subsystem for executing user commands and capturing terminal output.
+  - Implemented the context subsystem for collecting working directory, environment variables, and recent command output.
+  - Connected shell and context data to the UI subsystem for real-time updates.
+  - Handled concurrency and synchronization between shell I/O and UI rendering.
+
+- **Irys (AI & Security Subsystems)**
+  - Implemented the AI subsystem for sending queries and context to the cloud AI service and receiving suggestions.
+  - Developed the command suggestion pipeline and integrated AI responses into the UI.
+  - Built the security subsystem to analyze AI-generated commands and classify them as safe, warn, or block.
+  - Ensured potentially harmful commands never reach the shell subsystem.
+
+- **Yushun (UI & Application Framework)**
+  - Implemented the overall TUI structure, including the split-screen layout (shell pane + AI pane).
+  - Developed the main event loop and input handling for interactive navigation.
+  - Integrated UI updates for shell output, AI responses, and command cards.
+  - Ensured smooth rendering and responsiveness across the application.
+
+## **Lessons learned and concluding remarks**
+
+### **Lessons Learned**
+
+This project taught our team several technical and collaborative lessons.
+
+First, building a text based interface that feels modern and responsive in Rust was more challenging than expected. Terminal UI libraries offer a lot of flexibility, but they require careful handling of event loops, rendering updates, and asynchronous tasks. We learned how to structure UI code cleanly and how to avoid blocking operations.
+
+Second, integrating AI into a command line environment raised interesting design questions. For example, we had to decide how natural the assistant’s responses should be, how much context it should remember, and how conservative it should be when suggesting commands that run on a real system. Building a safe and friendly AI assistant required balancing accuracy, user expectations, and system integrity.
+
+Third, working with subprocesses taught us more about shell behavior. Running commands, capturing output, detecting errors, and preventing destructive actions required studying how different shells behave and how Rust interacts with them at the process level.
+
+Fourth, collaboration across the team improved our communication and version control skills. We practiced creating issues, reviewing pull requests, and coordinating changes so that our work merged smoothly.
+
+### **Concluding Remarks**
+
+Rusty Term demonstrates that AI can enhance traditional developer tools without replacing them. The project successfully blends the strengths of a classic terminal with the capabilities of modern language models. The result is a tool that makes command line usage more accessible, especially for users who do not want to memorize dozens of flags or construct long pipelines by hand.
+
+The project also shows the value of Rust as a systems language for building safe and efficient tools. Its strong type system, async capabilities, and ecosystem of libraries helped us create a responsive and reliable application.
+
+Looking ahead, Rusty Term could be expanded with features such as improved command history learning, offline AI models, or integrations with project specific tools like Git or Docker. The current version provides a strong foundation for future development and exploration.
+
+Overall, the project was rewarding from both a technical and educational standpoint. It showcased how AI and systems programming can complement each other to create novel and useful tools for developers.
