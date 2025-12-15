@@ -11,8 +11,6 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use std::process::Stdio;
 
-use crate::context::ContextSnapshot;
-
 #[derive(Clone, Debug)]
 pub struct Shell2Config {
     /// Per-command timeout.
@@ -118,18 +116,17 @@ async fn run_shell_script(cfg: &Shell2Config, cwd: &str, script: &str) -> Option
 /// - short timeouts
 /// - bounded output
 /// - read-only commands (best-effort)
-pub async fn collect_shell2_system_context(ctx: &ContextSnapshot) -> String {
-    collect_shell2_system_context_with_intent(ctx, Shell2Intent::default()).await
+pub async fn collect_shell2_system_context(cwd: &str) -> String {
+    collect_shell2_system_context_with_intent(cwd, Shell2Intent::default()).await
 }
 
 /// Same as `collect_shell2_system_context`, but allows choosing which checks to run.
-pub async fn collect_shell2_system_context_with_intent(ctx: &ContextSnapshot, intent: Shell2Intent) -> String {
+pub async fn collect_shell2_system_context_with_intent(cwd: &str, intent: Shell2Intent) -> String {
     let mut cfg = Shell2Config::default();
     // Tool version probes can be slightly slower than uname/whoami; allow a bit more time when requested.
     if intent.want_tools {
         cfg.total_timeout = Duration::from_millis(1000);
     }
-    let cwd = ctx.cwd.as_str();
 
     // Build a single script to minimize subprocess overhead.
     // Each block is best-effort and bounded (via head).
@@ -168,5 +165,3 @@ pub async fn collect_shell2_system_context_with_intent(ctx: &ContextSnapshot, in
 
     run_shell_script(&cfg, cwd, &script).await.unwrap_or_default()
 }
-
-

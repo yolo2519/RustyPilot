@@ -135,7 +135,7 @@ async fn main() -> Result<()> {
                             println!("\n✗ Error: {}\n", error);
                             stream_ended = true;
                         }
-                        AiUiUpdate::CommandSuggestion { commands, .. } => {
+                        AiUiUpdate::CommandSuggestion { commands, session_id: sid } => {
                             println!("\n");
                             println!("--- Command Suggestions ({}) ---", commands.len());
                             for (i, (cmd, exp)) in commands.iter().enumerate() {
@@ -143,6 +143,40 @@ async fn main() -> Result<()> {
                                 println!("      Explanation: {}", exp);
                             }
                             println!();
+
+                            // Ask user which to accept (or reject all)
+                            if !commands.is_empty() {
+                                print!("Enter number to accept (1-{}), or 'n' to reject all: ", commands.len());
+                                io::stdout().flush().ok();
+                                let mut response = String::new();
+                                if io::stdin().read_line(&mut response).is_ok() {
+                                    let response = response.trim().to_lowercase();
+
+                                    if response == "n" || response == "no" {
+                                        session_manager.reject_suggestion(sid);
+                                        println!("✗ Rejected all suggestions");
+                                    } else if let Ok(choice) = response.parse::<usize>() {
+                                        if choice >= 1 && choice <= commands.len() {
+                                            let pending_idx = choice - 1;
+                                            if let Some(cmd) = session_manager.accept_suggestion(sid, pending_idx) {
+                                                println!("✓ Accepted command: {}", cmd);
+                                                // In real app, would execute the command here
+                                                if let Err(e) = session_manager.execute_suggestion(sid, cmd) {
+                                                    println!("✗ Execute error: {}", e);
+                                                }
+                                            }
+                                        } else {
+                                            println!("✗ Invalid choice, rejecting all");
+                                            session_manager.reject_suggestion(sid);
+                                        }
+                                    } else {
+                                        println!("✗ Invalid input, rejecting all");
+                                        session_manager.reject_suggestion(sid);
+                                    }
+                                }
+                                println!();
+                            }
+
                             stream_ended = true;
                         }
                     }
@@ -167,45 +201,6 @@ async fn main() -> Result<()> {
                     stream_ended = true;
                 }
             }
-        }
-
-        // Show suggestions if available (from the session manager)
-        let pending = session_manager.get_pending_suggestions(session_id);
-        if !pending.is_empty() {
-            println!("--- Pending Suggestions ({}) ---", pending.len());
-            for (i, (cmd, exp)) in pending.iter().enumerate() {
-                println!("  [{}] Command: {}", i + 1, cmd);
-                println!("      Explanation: {}", exp);
-            }
-            println!();
-
-            // Demo: Ask user which to accept (or reject all)
-            print!("Enter number to accept (1-{}), or 'n' to reject all: ", pending.len());
-            io::stdout().flush()?;
-            let mut response = String::new();
-            io::stdin().read_line(&mut response)?;
-            let response = response.trim().to_lowercase();
-
-            if response == "n" || response == "no" {
-                session_manager.reject_suggestion(session_id);
-                println!("✗ Rejected all suggestions");
-            } else if let Ok(choice) = response.parse::<usize>() {
-                if choice >= 1 && choice <= pending.len() {
-                    let pending_idx = choice - 1;
-                    if let Some(cmd) = session_manager.accept_suggestion(session_id, pending_idx) {
-                        println!("✓ Accepted command: {}", cmd);
-                        // In real app, would execute the command here
-                        session_manager.execute_suggestion(session_id, cmd)?;
-                    }
-                } else {
-                    println!("✗ Invalid choice, rejecting all");
-                    session_manager.reject_suggestion(session_id);
-                }
-            } else {
-                println!("✗ Invalid input, rejecting all");
-                session_manager.reject_suggestion(session_id);
-            }
-            println!();
         }
     }
 

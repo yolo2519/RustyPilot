@@ -9,6 +9,8 @@ mod cwd;
 mod env;
 mod history;
 
+use serde::{Deserialize, Serialize};
+
 pub use command_log::{CommandLog, CommandRecord};
 pub use cwd::CurrentDir;
 pub use env::Environment;
@@ -45,19 +47,33 @@ impl ContextManager {
             cwd: self.cwd.path.clone(),
             env_vars: self.env.filtered_vars(),
             recent_history: self.history.recent(20),
-            recent_output: self.recent_output.iter().cloned().collect(),
+            // Only take last 6 lines for AI prompt
+            recent_output: self.recent_output.iter().rev().take(6).rev().cloned().collect(),
             recent_commands: Vec::new(), // Filled by caller with ShellManager data
         }
     }
 
     /// Create a snapshot with command records from ShellManager.
+    /// Truncates command outputs to 2KB for AI prompt efficiency.
     pub fn snapshot_with_commands(&self, command_records: Vec<CommandRecord>) -> ContextSnapshot {
+        // Truncate command outputs to reasonable size
+        let truncated_commands: Vec<CommandRecord> = command_records
+            .into_iter()
+            .map(|mut record| {
+                if record.output.len() > 2048 {
+                    record.output = truncate_output(&record.output, 2048);
+                }
+                record
+            })
+            .collect();
+
         ContextSnapshot {
             cwd: self.cwd.path.clone(),
             env_vars: self.env.filtered_vars(),
             recent_history: self.history.recent(20),
-            recent_output: self.recent_output.iter().cloned().collect(),
-            recent_commands: command_records,
+            // Only take last 6 lines for AI prompt
+            recent_output: self.recent_output.iter().rev().take(6).rev().cloned().collect(),
+            recent_commands: truncated_commands,
         }
     }
 
@@ -99,72 +115,37 @@ impl ContextManager {
 }
 
 /// A snapshot of context information for AI prompt building.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextSnapshot {
     pub cwd: String,
+    #[serde(rename = "env", skip_serializing_if = "Vec::is_empty", default)]
     pub env_vars: Vec<(String, String)>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub recent_history: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub recent_output: Vec<String>,
     /// Recent commands with their outputs (command_line, output)
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub recent_commands: Vec<CommandRecord>,
 }
 
-impl ContextSnapshot {
-    /// Format context as a string for AI prompts.
-    pub fn format_for_prompt(&self) -> String {
-        let mut result = String::new();
-        
-        // Current directory
-        result.push_str(&format!("Current directory: {}\n", self.cwd));
-        
-        // Recent commands with outputs (if any)
-        if !self.recent_commands.is_empty() {
-            result.push_str("\nRecent commands and outputs:\n");
-            for record in &self.recent_commands {
-                result.push_str(&format!("\n$ {}\n", record.command_line));
-                // Truncate output to reasonable size (max ~2KB per command)
-                let output_preview = truncate_output(&record.output, 2048);
-                if !output_preview.is_empty() {
-                    result.push_str(&output_preview);
-                    result.push('\n');
-                }
-            }
-        } else if !self.recent_history.is_empty() {
-            // Fallback to history if no command records
-            result.push_str("\nRecent commands:\n");
-            for (i, cmd) in self.recent_history.iter().rev().take(5).enumerate() {
-                result.push_str(&format!("  {}. {}\n", i + 1, cmd));
-            }
-        }
-        
-        // Key environment variables
-        if !self.env_vars.is_empty() {
-            result.push_str("\nRelevant environment:\n");
-            for (key, value) in &self.env_vars {
-                result.push_str(&format!("  {}={}\n", key, value));
-            }
-        }
-        
-        result
-    }
-}
-
 /// Truncate output to a maximum size, keeping the last N bytes.
-/// Adds ellipsis if truncated.
+/// Preserves UTF-8 boundaries and adds ellipsis if truncated.
 fn truncate_output(output: &str, max_bytes: usize) -> String {
     if output.len() <= max_bytes {
-        output.to_string()
-    } else {
-        // Take last max_bytes characters (might cut in middle of UTF-8 char, so be careful)
-        let truncated = if let Some((idx, _)) = output
-            .char_indices()
-            .rev()
-            .find(|(i, _)| output.len() - i <= max_bytes)
-        {
-            &output[idx..]
-        } else {
-            output
-        };
-        format!("...\n{}", truncated)
+        return output.to_string();
     }
+
+    // Find a valid UTF-8 boundary within max_bytes from the end
+    let start_from = output.len().saturating_sub(max_bytes);
+    let truncated = if let Some((idx, _)) = output[start_from..]
+        .char_indices()
+        .next()
+    {
+        &output[start_from + idx..]
+    } else {
+        &output[start_from..]
+    };
+
+    format!("...[truncated]\n{}", truncated)
 }

@@ -484,27 +484,6 @@ impl AiSessionManager {
         }
     }
 
-    /// Get all pending command suggestions for a session.
-    /// Returns a vector of (command, explanation) tuples.
-    pub fn get_pending_suggestions(&self, session_id: SessionId) -> Vec<(String, String)> {
-        let Some(session) = self.sessions.get(&session_id) else {
-            return Vec::new();
-        };
-
-        session.pending_suggestion_indices
-            .iter()
-            .filter_map(|&idx| session.command_suggestions.get(idx))
-            .map(|r| (r.command.clone(), r.explanation.clone()))
-            .collect()
-    }
-
-    /// Get a specific pending suggestion by its position in the pending list.
-    pub fn get_pending_suggestion_at(&self, session_id: SessionId, pending_idx: usize) -> Option<&CommandSuggestionRecord> {
-        let session = self.sessions.get(&session_id)?;
-        let &actual_idx = session.pending_suggestion_indices.get(pending_idx)?;
-        session.command_suggestions.get(actual_idx)
-    }
-
     /// Execute the suggested command for a session.
     /// This sends an ExecuteAiCommand event to the app layer.
     pub fn execute_suggestion(&self, session_id: SessionId, command: String) -> anyhow::Result<()> {
@@ -750,8 +729,11 @@ impl AiSessionManager {
             }
         };
 
-        // Build prompt with context (JSON format for reliable extraction)
-        let prompt = match prompt::build_prompt(user_input, &context) {
+        // Extract cwd before consuming context
+        let cwd = context.cwd.clone();
+
+        // Build prompt with context (consumes context to avoid cloning)
+        let prompt = match prompt::build_prompt(user_input, context) {
             Ok(p) => p,
             Err(e) => {
                 if let Err(e) = self.ai_stream_tx.try_send(AiStreamData::Error {
@@ -792,8 +774,6 @@ impl AiSessionManager {
         let force_shell2_refresh = should_force_shell2_refresh(user_input);
         let shell2_intent = shell2_intent_from_user_input(user_input);
 
-
-
         // Clone what we need for the async task
         let stream_tx = self.ai_stream_tx.clone();
         let client = self.client.clone();
@@ -804,7 +784,6 @@ impl AiSessionManager {
             // Shell2: collect extra system context (best-effort) before the network call.
             // Use TTL cache to avoid spawning subprocesses too frequently.
             let now = Instant::now();
-            let cwd = context.cwd.clone();
 
             let cached = {
                 let cache = shell2_cache.lock().await;
@@ -826,7 +805,7 @@ impl AiSessionManager {
             let shell2_ctx = if let Some(text) = cached {
                 text
             } else {
-                let text = collect_shell2_system_context_with_intent(&context, shell2_intent).await;
+                let text = collect_shell2_system_context_with_intent(&cwd, shell2_intent).await;
                 let mut cache = shell2_cache.lock().await;
                 cache.last = Some(Shell2CacheEntry {
                     at: Instant::now(),

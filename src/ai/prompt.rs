@@ -55,133 +55,25 @@ pub struct UserPrompt {
     /// The user's original request (what they actually typed)
     pub user_request: String,
     /// Shell context information
-    pub context: PromptContext,
-}
-
-/// Context information included in the prompt.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PromptContext {
-    /// Current working directory
-    pub cwd: String,
-    /// Relevant environment variables
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub env: Vec<(String, String)>,
-    /// Recent command history
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub recent_history: Vec<String>,
-    /// Recent terminal output
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub recent_output: Vec<String>,
-    /// Recent commands with their outputs
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub recent_commands: Vec<CommandWithOutput>,
-}
-
-/// A command with its output for context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandWithOutput {
-    pub command: String,
-    pub output: String,
+    pub context: ContextSnapshot,
 }
 
 /// Build a complete prompt for the AI including context and user query.
 ///
-/// Returns a JSON-formatted string that can be reliably parsed to extract
-/// the original user request.
+/// Takes ownership of the context to avoid unnecessary cloning.
+/// Note: Command output truncation and ANSI stripping are done earlier
+/// (in snapshot_with_commands and append_output respectively).
 ///
 /// # Errors
 ///
 /// Returns an error if JSON serialization fails (should be extremely rare).
-pub fn build_prompt(user_query: &str, ctx: &ContextSnapshot) -> Result<String, serde_json::Error> {
-    // Convert command records to the format expected by PromptContext
-    // Strip ANSI codes before sending to AI
-    let recent_commands: Vec<CommandWithOutput> = ctx
-        .recent_commands
-        .iter()
-        .map(|record| {
-            let cleaned_output = strip_ansi_codes(&record.output);
-            CommandWithOutput {
-                command: record.command_line.clone(),
-                output: truncate_text(&cleaned_output, 2048),
-            }
-        })
-        .collect();
-
+pub fn build_prompt(user_query: &str, ctx: ContextSnapshot) -> Result<String, serde_json::Error> {
     let prompt = UserPrompt {
         user_request: user_query.to_string(),
-        context: PromptContext {
-            cwd: ctx.cwd.clone(),
-            env: ctx.env_vars.clone(),
-            recent_history: ctx.recent_history.clone(),
-            recent_output: ctx.recent_output.iter().rev().take(6).rev().cloned().collect(),
-            recent_commands,
-        },
+        context: ctx,
     };
 
     serde_json::to_string_pretty(&prompt)
-}
-
-/// Strip ANSI escape codes from text.
-/// Removes color codes, cursor movements, and other terminal control sequences.
-fn strip_ansi_codes(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            // ESC sequence started
-            if chars.peek() == Some(&'[') {
-                chars.next(); // consume '['
-                // Skip until we hit a letter (CSI sequence terminator)
-                while let Some(&next_ch) = chars.peek() {
-                    chars.next();
-                    if next_ch.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            } else if chars.peek() == Some(&']') {
-                // OSC sequence (e.g., OSC 7 for directory)
-                chars.next(); // consume ']'
-                // Skip until we hit BEL (\x07) or ST (\x1b\\)
-                while let Some(&next_ch) = chars.peek() {
-                    chars.next();
-                    if next_ch == '\x07' {
-                        break;
-                    }
-                    if next_ch == '\x1b' && chars.peek() == Some(&'\\') {
-                        chars.next(); // consume '\\'
-                        break;
-                    }
-                }
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-    
-    result
-}
-
-/// Truncate text to a maximum number of bytes, preserving UTF-8 boundaries.
-fn truncate_text(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    
-    // Find the last valid UTF-8 character boundary within max_bytes
-    if let Some((idx, _)) = text
-        .char_indices()
-        .take_while(|(i, _)| *i < max_bytes)
-        .last()
-    {
-        let mut result = text[..=idx].to_string();
-        if idx < text.len() - 1 {
-            result.push_str("...[truncated]");
-        }
-        result
-    } else {
-        String::new()
-    }
 }
 
 /// Extract the original user request from a JSON-formatted prompt.
@@ -194,30 +86,13 @@ pub fn extract_user_request(prompt_json: &str) -> Option<String> {
         .map(|p| p.user_request)
 }
 
-/// Build a prompt for command explanation.
-pub fn build_explain_prompt(command: &str, ctx: &ContextSnapshot) -> String {
-    format!(
-        "You are a shell command expert. Explain what this command does in detail:\n\n\
-         Command: {command}\n\n\
-         Context:\n{context}\n\n\
-         Provide a clear explanation including:\n\
-         1. What each part of the command does\n\
-         2. What files or resources it will affect\n\
-         3. Any potential risks or side effects\n\
-         4. Safer alternatives if applicable",
-        command = command,
-        context = ctx.format_for_prompt()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::CommandRecord;
 
     #[test]
     fn test_build_prompt_basic() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::context::CommandRecord;
-        
         let ctx = ContextSnapshot {
             cwd: "/home/user/projects".to_string(),
             env_vars: vec![
@@ -234,7 +109,7 @@ mod tests {
             ],
         };
 
-        let prompt = build_prompt("list all files", &ctx)?;
+        let prompt = build_prompt("list all files", ctx)?;
 
         // Verify it's valid JSON
         let parsed: UserPrompt = serde_json::from_str(&prompt)?;
@@ -242,7 +117,7 @@ mod tests {
         assert_eq!(parsed.context.cwd, "/home/user/projects");
         assert!(parsed.context.recent_output.contains(&"output line".to_string()));
         assert_eq!(parsed.context.recent_commands.len(), 1);
-        assert_eq!(parsed.context.recent_commands[0].command, "ls -la");
+        assert_eq!(parsed.context.recent_commands[0].command_line, "ls -la");
         Ok(())
     }
 
@@ -256,7 +131,7 @@ mod tests {
             recent_commands: vec![],
         };
 
-        let prompt = build_prompt("help me", &ctx)?;
+        let prompt = build_prompt("help me", ctx)?;
 
         let parsed: UserPrompt = serde_json::from_str(&prompt)?;
         assert_eq!(parsed.user_request, "help me");
@@ -275,7 +150,7 @@ mod tests {
             recent_commands: vec![],
         };
 
-        let prompt = build_prompt("find large files", &ctx)?;
+        let prompt = build_prompt("find large files", ctx)?;
         let extracted = extract_user_request(&prompt);
 
         assert_eq!(extracted, Some("find large files".to_string()));
@@ -294,64 +169,10 @@ mod tests {
 
         // Test with special characters that need JSON escaping
         let query = "find files with \"quotes\" and\nnewlines";
-        let prompt = build_prompt(query, &ctx)?;
+        let prompt = build_prompt(query, ctx)?;
         let extracted = extract_user_request(&prompt);
 
         assert_eq!(extracted, Some(query.to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn test_strip_ansi_codes() {
-        // Test basic color codes
-        let input = "\x1b[31mRed text\x1b[0m Normal text";
-        let expected = "Red text Normal text";
-        assert_eq!(strip_ansi_codes(input), expected);
-
-        // Test cursor movement
-        let input = "Line 1\x1b[2J\x1b[HCleared";
-        let expected = "Line 1Cleared";
-        assert_eq!(strip_ansi_codes(input), expected);
-
-        // Test multiple escape sequences
-        let input = "\x1b[1m\x1b[32mBold Green\x1b[0m";
-        let expected = "Bold Green";
-        assert_eq!(strip_ansi_codes(input), expected);
-
-        // Test OSC sequences (e.g., OSC 7 for directory)
-        let input = "Before\x1b]7;file://host/path\x07After";
-        let expected = "BeforeAfter";
-        assert_eq!(strip_ansi_codes(input), expected);
-
-        // Test no escape codes
-        let input = "Plain text";
-        assert_eq!(strip_ansi_codes(input), input);
-    }
-
-    #[test]
-    fn test_build_prompt_strips_ansi() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::context::CommandRecord;
-        
-        let ctx = ContextSnapshot {
-            cwd: "/home/user".to_string(),
-            env_vars: vec![],
-            recent_history: vec![],
-            recent_output: vec![],
-            recent_commands: vec![
-                CommandRecord {
-                    command_line: "ls".to_string(),
-                    output: "\x1b[31mfile1.txt\x1b[0m\n\x1b[32mfile2.txt\x1b[0m\n".to_string(),
-                },
-            ],
-        };
-
-        let prompt = build_prompt("list files", &ctx)?;
-        let parsed: UserPrompt = serde_json::from_str(&prompt)?;
-        
-        // Verify ANSI codes are stripped from output
-        assert_eq!(parsed.context.recent_commands[0].output, "file1.txt\nfile2.txt\n");
-        assert!(!parsed.context.recent_commands[0].output.contains("\x1b"));
-        
         Ok(())
     }
 }

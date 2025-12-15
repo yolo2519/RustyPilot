@@ -49,7 +49,7 @@ pub mod ui;
 pub mod utils;
 
 // Re-export commonly used types
-pub use ai::{AiClient, AiSessionManager};
+pub use ai::AiSessionManager;
 pub use app::{ActivePane, App};
 pub use context::{ContextManager, ContextSnapshot};
 pub use event::{init_app_eventsource, init_user_event, AiStreamData, AiUiUpdate, AppEvent, UserEvent};
