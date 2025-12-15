@@ -3,7 +3,44 @@
 //! This example shows how CommandLog tracks commands and outputs,
 //! and how this data is used for AI context.
 
-use rusty_term::context::{CommandLog, CommandRecord, ContextManager};
+use rusty_term::context::{CommandLog, CommandRecord, ContextManager, ContextSnapshot};
+
+/// Format a context snapshot as human-readable text for display.
+fn format_snapshot(snapshot: &ContextSnapshot) -> String {
+    let mut result = String::new();
+
+    result.push_str(&format!("Current directory: {}\n", snapshot.cwd));
+
+    if !snapshot.recent_commands.is_empty() {
+        result.push_str("\nRecent commands and outputs:\n");
+        for record in &snapshot.recent_commands {
+            result.push_str(&format!("\n$ {}\n", record.command_line));
+            let output_preview = if record.output.len() > 2048 {
+                format!("...{}", &record.output[record.output.len() - 2048..])
+            } else {
+                record.output.clone()
+            };
+            if !output_preview.is_empty() {
+                result.push_str(&output_preview);
+                result.push('\n');
+            }
+        }
+    } else if !snapshot.recent_history.is_empty() {
+        result.push_str("\nRecent commands:\n");
+        for (i, cmd) in snapshot.recent_history.iter().rev().take(5).enumerate() {
+            result.push_str(&format!("  {}. {}\n", i + 1, cmd));
+        }
+    }
+
+    if !snapshot.env_vars.is_empty() {
+        result.push_str("\nRelevant environment:\n");
+        for (key, value) in &snapshot.env_vars {
+            result.push_str(&format!("  {}={}\n", key, value));
+        }
+    }
+
+    result
+}
 
 fn main() {
     println!("=== Command Context Demo ===\n");
@@ -35,7 +72,7 @@ fn main() {
     println!("📝 Recorded {} commands:", log.len());
     for (i, record) in log.entries().iter().enumerate() {
         println!("\n{}. Command: {}", i + 1, record.command_line);
-        println!("   Output preview: {}", 
+        println!("   Output preview: {}",
             record.output
                 .lines()
                 .take(2)
@@ -48,7 +85,7 @@ fn main() {
     println!("\n\n=== AI Context ===\n");
     let recent = log.recent(2);
     println!("Most recent {} commands for AI:", recent.len());
-    
+
     for record in recent {
         println!("\n$ {}", record.command_line);
         for line in record.output.lines() {
@@ -61,13 +98,13 @@ fn main() {
     let context_manager = ContextManager::new();
     let commands: Vec<CommandRecord> = log.recent(3).to_vec();
     let snapshot = context_manager.snapshot_with_commands(commands);
-    
+
     println!("Current directory: {}", snapshot.cwd);
     println!("Recent commands in snapshot: {}", snapshot.recent_commands.len());
-    
+
     // Show how this would be formatted for AI
     println!("\n=== Formatted for AI Prompt ===\n");
-    println!("{}", snapshot.format_for_prompt());
+    println!("{}", format_snapshot(&snapshot));
 
     // Demonstrate bounded behavior
     println!("\n=== Bounded Log Behavior ===\n");
@@ -75,13 +112,13 @@ fn main() {
     for i in 1..=5 {
         bounded_log.start_new_command(format!("command_{}", i));
     }
-    
+
     println!("Added 5 commands to log with capacity 3");
     println!("Commands in log: {}", bounded_log.len());
     println!("Commands kept:");
     for record in bounded_log.entries() {
         println!("  - {}", record.command_line);
     }
-    
+
     println!("\n✅ Demo complete!");
 }
