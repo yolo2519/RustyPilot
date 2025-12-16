@@ -13,7 +13,7 @@
 
 ## **Video Slide Presentation**
 
-_Add link here._
+[`Video Slide Presentation`](https://www.youtube.com/watch?v=4wTFs4EZOfs)
 
 ## **Video Demo**
 
