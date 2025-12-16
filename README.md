@@ -17,7 +17,7 @@ _Add link here._
 
 ## **Video Demo**
 
-_Add link here._
+[`Video Demo`](https://docs.google.com/document/d/1p-YxO4cQ_A1LVIlSiInkzDVqDJRM4MArDDH1jRmsATU/edit?pli=1&tab=t.0)
 
 ## **Motivation**
 
