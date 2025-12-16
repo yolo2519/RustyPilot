@@ -11,6 +11,14 @@
 
 ---
 
+## **Video Slide Presentation**
+
+_Add link here._
+
+## **Video Demo**
+
+_Add link here._
+
 ## **Motivation**
 
 In the modern software development workflow, the command line interface remains one of the most powerful tools for interacting with systems. Despite its power, many users struggle with recalling the correct command syntax, flags, and pipelines that are essential to accomplish common developer tasks. In practice, developers often know what they want to do, but not how to do it using the CLI. This leads many developers, both novice and experienced, to constantly switch between the terminal and other applications like web browsers, search engines, or external AI tools just to remember the right commands. These context switches break focus, slow down productivity, and disrupt the cognitive flow of problem solving.
