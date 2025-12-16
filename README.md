@@ -17,7 +17,7 @@
 
 ## **Video Demo**
 
-[`Video Demo`](https://docs.google.com/document/d/1p-YxO4cQ_A1LVIlSiInkzDVqDJRM4MArDDH1jRmsATU/edit?pli=1&tab=t.0)
+[`Video Demo`](https://youtu.be/BkEhetQjRf8?si=xxsrOieLCDIXugK9)
 
 ## **Motivation**
 
