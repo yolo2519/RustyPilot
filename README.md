@@ -39,6 +39,52 @@ The primary objective of this project was to design and implement a Rust-based A
 
 The successful completion of these objectives required integrating AI APIs, handling asynchronous operations, rendering terminal user interfaces, analyzing user input and command results, enforcing security policies, and managing subprocesses; these were central technical objectives throughout the project’s implementation.
 
+## **Features**
+
+Rusty-Term’s final deliverable offers a series of features that together form a usable AI-assisted shell experience. These are grouped by core functionality and interaction:
+
+### i). TUI Split Interface
+
+At the core of Rusty-Term is its interactive text-based user interface. This interface consists of two main panes:
+
+- **Left Pane**: A fully functional shell session, typically Zsh or Bash based on the user's `$SHELL` configuration, where the user can type and execute commands as normal.
+- **Right Pane**: The AI assistant panel where users enter natural language queries and receive suggested commands.
+
+The split layout is navigable entirely via keyboard or mouse, preserving the feel of modern terminal workflows.
+
+### ii). AI Command Suggestions
+
+The tool supports two primary actions for each AI-generated command:
+
+- **Execute / Copy**: Accept the suggestion. If the command is evaluated as low or medium risk, it is executed directly in the shell. If it is high risk, the command is copied to the clipboard so the user can review before executing manually.
+- **Cancel**: Reject the suggestion and continue working or ask the assistant for a new command.
+
+Additional interactions such as explaining or revising a command are handled conversationally. Users can simply ask follow-up questions in natural language (for example, “Explain this”, “Can you modify it?”), and RustyTerm will respond accordingly. When a user initiates a new interaction, previous suggestions are treated as dismissed automatically.
+
+### iii). Contextual Awareness
+
+Rusty-Term doesn’t treat each query in isolation. It optionally reads context like:
+
+- **Current working directory**
+- **Environment variables**
+- **Last executed commands, with outputs**
+
+This allows AI suggestions to account for context such as project structure, file paths, or previous user actions, making recommendations more accurate and useful.
+
+### iv). Security and Trust Layer
+
+Since AI-generated commands can pose a safety risk if executed blindly, Rusty-Term includes a security analysis module. This performs static analysis on suggested commands to:
+
+- **Detect potentially harmful operations** (such as `rm -rf /`)
+- **Trigger warnings for risky actions**
+- **Use a built-in allowlist of permitted operations** to avoid flagging known safe commands
+
+This ensures users maintain control and are informed before executing impactful operations.
+
+### v). Session and Context Management
+
+Rusty-Term supports multiple AI sessions, letting users maintain ongoing contexts across different tasks (for example debugging versus file management). Session-based context enhances conversational continuity, allowing the assistant to refine suggestions over time.
+
 ---
 
 ## Reproducibility Guide
